@@ -321,13 +321,14 @@
       (insert "One sentence. Another one.")
       (kokoro-read-buffer)
       (should kokoro-mode)
-      ;; The controls go in front of the header line the buffer had.
-      (should (equal (cddr header-line-format) '("Chapter title")))
+      ;; The controls take the place of the header line the buffer had.
+      (should (equal header-line-format (list kokoro--header)))
       (kokoro-test--play (car (car kokoro--pending)))
       (let ((line (kokoro--header-line)))
         (should (string-match-p "\\[Pause\\]" line))
-        (should (string-match-p "0%%" line))          ; escaped for the header line
         (should (string-match-p "Voice: af_heart" line))
+        ;; Progress comes last, escaped for the header line.
+        (should (string-match-p "\\[Speed: 1\\.0\\]  0%%\\'" line))
         (should (get-text-property (string-search "[Stop]" line) 'local-map line)))
       (kokoro-pause)
       (should (string-match-p "\\[Resume\\]" (kokoro--header-line)))
@@ -379,6 +380,47 @@
         (goto-char (point-min))
         (search-forward "B")
         (should (equal (get-text-property (1- (point)) 'kokoro-pdf) '(1 0.1 0.5 0.2 0.52)))))))
+
+(ert-deftest kokoro-test-pdf-margins-per-file ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (let ((kokoro-pdf-margins '(0.06 . 0.06))
+            (other (make-temp-file "kokoro-other-" nil ".pdf")))
+        (cl-letf (((symbol-function 'pdf-info-number-of-pages) (lambda () 1))
+                  ((symbol-function 'pdf-info-charlayout)
+                   (lambda (_page)
+                     ;; "Header." at 10% of the height, "Body." at 50%.
+                     (append (mapcar (lambda (c) (list c '(0.1 0.10 0.2 0.12))) "Header. ")
+                             (mapcar (lambda (c) (list c '(0.1 0.50 0.2 0.52))) "Body.")))))
+          (unwind-protect
+              (progn
+                ;; With the usual margins the header is read.
+                (with-current-buffer (find-file-noselect book)
+                  (setq sent nil)
+                  (kokoro--read-pdf-page (current-buffer) 1)
+                  (should (equal (kokoro-test--spoken sent) '("Header." "Body.")))
+                  ;; This PDF leaves out its top 15%.
+                  (kokoro-set-pdf-margins 15 5)
+                  (should (equal kokoro-pdf-margins '(0.15 . 0.05)))
+                  (kokoro-stop)
+                  (kill-buffer))
+                ;; Remembered: a new buffer of it, after a restart, leaves it out.
+                (setq kokoro--sources 'unread)
+                (with-current-buffer (find-file-noselect book)
+                  (setq sent nil)
+                  (kokoro--read-pdf-page (current-buffer) 1)
+                  (should (equal (kokoro-test--spoken sent) '("Body.")))
+                  (kokoro-stop)
+                  (kill-buffer))
+                ;; Other PDFs keep the usual margins.
+                (with-current-buffer (find-file-noselect other)
+                  (setq sent nil)
+                  (kokoro--read-pdf-page (current-buffer) 1)
+                  (should (equal (kokoro-test--spoken sent) '("Header." "Body.")))
+                  (kokoro-stop)
+                  (kill-buffer)))
+            (delete-file other)))
+        (should-error (kokoro-set-pdf-margins 60 50) :type 'user-error)))))
 
 (ert-deftest kokoro-test-pdf-sentence-carried-over ()
   (kokoro-test--with-fake-server

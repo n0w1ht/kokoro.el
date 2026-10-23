@@ -77,6 +77,7 @@ Then in your init file:
 | `C-c t +/-` | `kokoro-faster/slower`      | Change speed by 0.1                                       |
 | `C-c t w`   | `kokoro-save-audio`         | Narrate a txt/md/pdf/docx file into a WAV, in background  |
 | `C-c t W`   | `kokoro-save-region-audio`  | Narrate the region into a WAV                             |
+| `C-c t m`   | `kokoro-set-pdf-margins`    | Set how much of the top and bottom of this PDF is left out |
 | `C-c t x`   | `kokoro-skip-text`          | Leave out text matching a regexp, in this file            |
 | `C-c t X`   | `kokoro-unskip-text`        | Read text matching one of this file's regexps again       |
 | `C-c t f`   | `kokoro-forget-source`      | Forget the voice, speed and left-out text for this file   |
@@ -89,6 +90,15 @@ British voice for one book. This is remembered in `~/.emacs.d/kokoro-sources.eld
 restarting Emacs, and by `C-c t w`. Once a file has its own speed, `C-c t +/-`
 change it for that file. `C-c t f` (`kokoro-forget-source`) forgets the file's
 voice and speed. Buffers without a file only keep them until they are closed.
+
+## PDF margins
+
+Running headers, footers and page numbers are left out by skipping the top and
+bottom 6% of each page. When a PDF needs more or less, open it and press
+`C-c t m`: it asks for the top and bottom, in percent of the page height,
+shades the part that will be read, and remembers them for that PDF in
+`kokoro-sources.eld`. If you are reading it, the page is read again with them.
+`C-c t f` forgets them along with the PDF's voice and speed.
 
 ## Leaving out text
 
@@ -127,7 +137,7 @@ with `b` British English; the voice list shows which are female and male.
 | `kokoro-text-functions` | Functions a sentence passes through before it is spoken    |
 | `kokoro-abbreviations`  | Words ending in "." that do not end a sentence             |
 | `kokoro-skip-rules`     | Parts not read, per major mode                             |
-| `kokoro-pdf-margins`    | Top and bottom of a PDF page left out, `(0.06 . 0.06)`     |
+| `kokoro-pdf-margins`    | Top and bottom of a PDF page left out, `(0.06 . 0.06)`; each PDF can have its own (`C-c t m`) |
 | `kokoro-pdf-highlight`  | Highlight the sentence on the PDF page                     |
 | `kokoro-header-line`    | Show the controls in the header line while reading         |
 | `kokoro-follow`         | Keep the sentence in view                                  |

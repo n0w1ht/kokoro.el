@@ -196,8 +196,10 @@ over it silently.  Case is ignored."
 
 (defcustom kokoro-pdf-margins '(0.06 . 0.06)
   "Parts of a PDF page left out, as fractions of its height: (TOP . BOTTOM).
-They are usually running headers, footers and page numbers."
-  :type '(cons number number))
+They are usually running headers, footers and page numbers.  Each PDF
+can have its own, set with \\[kokoro-set-pdf-margins]."
+  :type '(cons number number)
+  :safe (lambda (v) (and (consp v) (numberp (car v)) (numberp (cdr v)))))
 
 (defcustom kokoro-pdf-highlight t
   "When non-nil, highlight the sentence being read on the PDF page."
@@ -216,7 +218,8 @@ They are usually running headers, footers and page numbers."
 (defvar kokoro--session nil
   "What is being read: a plist.
 :buffer, :pos and :end say where the text is.  :display is the buffer
-the reader sees (the PDF for a PDF page).  :next is nil or a function
+the reader sees (the PDF for a PDF page), and :page the PDF page being
+read.  :next is nil or a function
 that starts the following page or chapter and returns non-nil when it
 did.  :progress is nil or a function returning where the reading is.")
 (defvar kokoro--pending nil
@@ -497,7 +500,8 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
               (prop (pcase var
                       ('kokoro-voice :voice)
                       ('kokoro-speed :speed)
-                      ('kokoro--file-removals :remove))))
+                      ('kokoro--file-removals :remove)
+                      ('kokoro-pdf-margins :margins))))
     (let ((entry (assoc key (kokoro--sources))))
       (if entry
           (setcdr entry (plist-put (cdr entry) prop value))
@@ -514,7 +518,45 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
           (setq-local kokoro-voice voice))
         (when-let* ((speed (plist-get settings :speed)))
           (setq-local kokoro-speed speed))
+        (when-let* ((margins (plist-get settings :margins)))
+          (setq-local kokoro-pdf-margins margins))
         (setq kokoro--file-removals (plist-get settings :remove))))))
+
+;;;###autoload
+(defun kokoro-set-pdf-margins (top bottom)
+  "Leave out the TOP and BOTTOM percent of each page of this PDF.
+This is remembered for the PDF; `kokoro-pdf-margins' is used for others.
+The part that is read is shaded on the page until it is redrawn."
+  (interactive
+   (progn
+     (unless (derived-mode-p 'pdf-view-mode)
+       (user-error "Kokoro: not a PDF"))
+     (kokoro--apply-source (current-buffer))
+     (let ((now (or kokoro-pdf-margins '(0 . 0))))
+       (list (read-number "Leave out the top (% of page height): "
+                          (round (* 100 (car now))))
+             (read-number "Leave out the bottom (% of page height): "
+                          (round (* 100 (cdr now))))))))
+  (unless (and (<= 0 top) (<= 0 bottom) (< (+ top bottom) 100))
+    (user-error "Kokoro: the margins must leave part of the page"))
+  (let ((margins (cons (/ top 100.0) (/ bottom 100.0)))
+        (pdf (current-buffer)))
+    (setq-local kokoro-pdf-margins margins)
+    (kokoro--remember 'kokoro-pdf-margins margins)
+    ;; Show what is read now.
+    (dolist (win (get-buffer-window-list pdf nil t))
+      (with-selected-window win
+        (ignore-errors
+          (pdf-view-display-region
+           (list (image-mode-window-get 'page win)
+                 (list 0 (car margins) 1 (- 1 (cdr margins))))
+           t))))
+    (message "Kokoro: reading this PDF from %s%% to %s%% of the page height (shaded)"
+             top (- 100 bottom))
+    ;; Read the page again with the new margins.
+    (when-let* ((page (and (eq (plist-get kokoro--session :display) pdf)
+                           (plist-get kokoro--session :page))))
+      (kokoro--read-pdf-page pdf page))))
 
 (defun kokoro--check-regexp (regexp)
   "Signal a `user-error' unless REGEXP is a valid regexp matching some text."
@@ -564,6 +606,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
     (let ((key (kokoro--source-key)))
       (kill-local-variable 'kokoro-voice)
       (kill-local-variable 'kokoro-speed)
+      (kill-local-variable 'kokoro-pdf-margins)
       (setq kokoro--file-removals nil)
       (when (and key (assoc key (kokoro--sources)))
         (setq kokoro--sources (assoc-delete-all key kokoro--sources))
@@ -709,6 +752,7 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
            (end (marker-position (plist-get s :end)))
            (props (list :next (plist-get s :next)
                         :display (plist-get s :display)
+                        :page (plist-get s :page)
                         :progress (plist-get s :progress)))
            (start (with-current-buffer buf
                     (save-excursion (funcall move entry) (point)))))
@@ -745,9 +789,10 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
 The margins of `kokoro-pdf-margins' and lines with only a page number
 are left out.  Each character keeps its place on the page in the text
 property `kokoro-pdf', as (PAGE LEFT TOP RIGHT BOTTOM)."
-  (let ((top (or (car kokoro-pdf-margins) 0))
-        (bottom (- 1 (or (cdr kokoro-pdf-margins) 0)))
-        (start (point)))
+  (let* ((margins (buffer-local-value 'kokoro-pdf-margins pdf))
+         (top (or (car margins) 0))
+         (bottom (- 1 (or (cdr margins) 0)))
+         (start (point)))
     (pcase-dolist (`(,char ,edges) (with-current-buffer pdf (pdf-info-charlayout page)))
       (when (or (memq char '(?\s ?\t ?\n))
                 (and (>= (nth 1 edges) top) (<= (nth 3 edges) bottom)))
@@ -774,6 +819,7 @@ property `kokoro-pdf', as (PAGE LEFT TOP RIGHT BOTTOM)."
   "Read PAGE of the PDF buffer PDF, then the pages after it.
 SKIP characters at the start of the page were read with the page before.
 A sentence running onto the next page is finished before turning it."
+  (kokoro--apply-source pdf)            ; its own margins, before reading the page
   (let ((pages (with-current-buffer pdf (pdf-info-number-of-pages)))
         carry)
     (with-current-buffer (get-buffer-create " *kokoro-pdf*")
@@ -799,6 +845,7 @@ A sentence running onto the next page is finished before turning it."
       (message "Kokoro: page %d" page)
       (kokoro--read (point-min) (point-max)
                     (list :display pdf
+                          :page page
                           :next (lambda () (kokoro--pdf-next pdf page carry))
                           :progress (lambda () (format "page %d/%d" page pages)))))))
 
@@ -858,13 +905,11 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
   (and (consp header-line-format) (eq (car header-line-format) kokoro--header)))
 
 (defun kokoro--install-header ()
-  "Put the controls in front of the buffer's header line, unless there."
+  "Show the controls in place of the buffer's header line, unless there.
+The header line it had (e.g. the book and chapter title) comes back after."
   (unless (kokoro--header-installed-p)
     (setq kokoro--saved-header (cons (local-variable-p 'header-line-format) header-line-format))
-    (setq-local header-line-format
-                (if header-line-format
-                    (list kokoro--header "  " header-line-format)
-                  (list kokoro--header)))))
+    (setq-local header-line-format (list kokoro--header))))
 
 ;;;###autoload
 (define-minor-mode kokoro-mode
@@ -944,19 +989,19 @@ It is turned on in the buffer being read, unless `kokoro-header-line' is nil."
                     (kokoro--button "[Pause]" #'kokoro-pause "Pause reading"))
                   " "
                   (kokoro--button "[Next]" #'kokoro-next "Skip to the next sentence") " "
-                  (kokoro--button "[Stop]" #'kokoro-stop "Stop reading")
-                  "  "
-                  (if kokoro--ready (kokoro--progress) "loading the voice..."))
+                  (kokoro--button "[Stop]" #'kokoro-stop "Stop reading"))
         (concat (kokoro--button "[Read from here]" #'kokoro-read-dwim
                                 "Read the region, or from point on")
                 " "
                 (kokoro--button "[Read all]" #'kokoro-read-buffer "Read the whole buffer")))
       "  "
       (kokoro--button (format "[Voice: %s]" (kokoro--voice)) #'kokoro-select-voice
-                      "Choose the voice (C-u: for this buffer only)")
+                      "Choose the voice (C-u: for this file only)")
       " "
       (kokoro--button (format "[Speed: %.1f]" (kokoro--speed)) #'kokoro-set-speed
-                      "Set the speed (C-u: for this buffer only)")))))
+                      "Set the speed (C-u: for this file only)")
+      (when reading
+        (concat "  " (if kokoro--ready (kokoro--progress) "loading the voice...")))))))
 
 ;;;; Commands
 
@@ -1154,6 +1199,7 @@ When DELETE-INPUT is non-nil, delete FILE once done."
   "w" #'kokoro-save-audio
   "W" #'kokoro-save-region-audio
   "f" #'kokoro-forget-source
+  "m" #'kokoro-set-pdf-margins
   "x" #'kokoro-skip-text
   "X" #'kokoro-unskip-text
   "h" #'kokoro-mode
