@@ -18,6 +18,7 @@ Read buffers, EPUB books (nov.el) and PDFs (pdf-tools) aloud in Emacs with the
   (`kokoro-pronunciations`, which comes with common medical units and dosing
   abbreviations), and any function can be added to `kokoro-text-functions`.
 - The voice and speed can be set for one buffer only, with `C-u`.
+- Each file remembers where you stopped, and `C-c t c` reads on from there.
 
 ## How it works
 
@@ -69,6 +70,7 @@ Then in your init file:
 | `C-c t r`   | `kokoro-read-region`        | Read the region                                           |
 | `C-c t a`   | `kokoro-read-buffer`        | Read the whole buffer                                     |
 | `C-c t .`   | `kokoro-read-paragraph`     | Read the paragraph at point                               |
+| `C-c t c`   | `kokoro-resume`             | Read on from where you stopped in this file; `C-u`: pick a file |
 | `C-c t SPC` | `kokoro-pause`              | Pause or resume                                           |
 | `C-c t s`   | `kokoro-stop`               | Stop                                                      |
 | `C-c t n/p` | `kokoro-next/previous`      | Skip to the next or previous sentence                     |
@@ -90,6 +92,15 @@ British voice for one book. This is remembered in `~/.emacs.d/kokoro-sources.eld
 restarting Emacs, and by `C-c t w`. Once a file has its own speed, `C-c t +/-`
 change it for that file. `C-c t f` (`kokoro-forget-source`) forgets the file's
 voice and speed. Buffers without a file only keep them until they are closed.
+
+## Reading on where you stopped
+
+Each file remembers the sentence you were on: the page in a PDF, the chapter
+in an EPUB. `C-c t c` (`kokoro-resume`) reads on from there, also after
+restarting Emacs. Pressed in a buffer that has no place, or with `C-u`, it
+lists the files you have read, the last one first, and opens the one you pick
+where you stopped. Places are kept in `kokoro-sources-file`; set
+`kokoro-remember-place` to nil to keep none.
 
 ## PDF margins
 
@@ -132,6 +143,7 @@ with `b` British English; the voice list shows which are female and male.
 |-------------------------|------------------------------------------------------------|
 | `kokoro-voice`, `kokoro-speed` | Voice and speed (can be set per file)              |
 | `kokoro-sources-file`   | Where per-file voice and speed are kept (nil: nowhere)     |
+| `kokoro-remember-place` | Remember where reading got to in each file (`C-c t c`)     |
 | `kokoro-remove-regexps` | Regexps of text left out in every file                     |
 | `kokoro-pronunciations` | `("mg" . "milligrams")` pairs, matched as whole words      |
 | `kokoro-text-functions` | Functions a sentence passes through before it is spoken    |

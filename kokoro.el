@@ -31,6 +31,8 @@
 ;;               current one on
 ;;   C-c t r     read the region          C-c t a   read the whole buffer
 ;;   C-c t .     read the paragraph
+;;   C-c t c     read on from where you stopped in this file (C-u: in
+;;               another file read before)
 ;;   C-c t SPC   pause or resume          C-c t s   stop
 ;;   C-c t n/p   skip to the next/previous sentence
 ;;   C-c t v     choose the voice         C-c t +/- faster/slower
@@ -65,8 +67,10 @@
 (declare-function pdf-view-display-region "ext:pdf-view")
 (declare-function pdf-view-redisplay "ext:pdf-view")
 (declare-function nov-next-document "ext:nov")
+(declare-function nov-goto-document "ext:nov")
 (defvar nov-documents)
 (defvar nov-documents-index)
+(defvar nov-file-name)
 
 ;;;; Options
 
@@ -118,6 +122,11 @@ They are chosen with `kokoro-select-voice' and `kokoro-set-speed' with
 a prefix argument, and forgotten with `kokoro-forget-source'.
 When nil, nothing is remembered."
   :type '(choice file (const :tag "Do not remember" nil)))
+
+(defcustom kokoro-remember-place t
+  "When non-nil, remember where reading got to in each file.
+\\[kokoro-resume] reads on from there.  It is kept in `kokoro-sources-file'."
+  :type 'boolean)
 
 (defcustom kokoro-follow t
   "When non-nil, scroll so the sentence being read stays in view."
@@ -293,6 +302,7 @@ did.  :progress is nil or a function returning where the reading is.")
       ("start"
        (when-let* ((entry (assq id kokoro--pending)))
          (setq kokoro--current entry)
+         (kokoro--note-place entry)
          (kokoro--show entry)))
       ("end"
        (when (assq id kokoro--pending)
@@ -469,7 +479,9 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
 
 (defun kokoro--source-key ()
   "The name the current buffer's file is remembered under, or nil."
-  (and buffer-file-name (abbreviate-file-name (expand-file-name buffer-file-name))))
+  ;; nov.el leaves its EPUB buffers without `buffer-file-name'.
+  (when-let* ((file (or buffer-file-name (bound-and-true-p nov-file-name))))
+    (abbreviate-file-name (expand-file-name file))))
 
 (defun kokoro--sources ()
   "The remembered settings, read from `kokoro-sources-file' the first time."
@@ -502,11 +514,15 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
                       ('kokoro-speed :speed)
                       ('kokoro--file-removals :remove)
                       ('kokoro-pdf-margins :margins))))
-    (let ((entry (assoc key (kokoro--sources))))
-      (if entry
-          (setcdr entry (plist-put (cdr entry) prop value))
-        (push (list key prop value) kokoro--sources)))
+    (kokoro--put-source key prop value)
     (kokoro--save-sources)))
+
+(defun kokoro--put-source (key prop value)
+  "Set PROP to VALUE in the settings remembered for KEY, without saving them."
+  (let ((entry (assoc key (kokoro--sources))))
+    (if entry
+        (setcdr entry (plist-put (cdr entry) prop value))
+      (push (list key prop value) kokoro--sources))))
 
 (defun kokoro--apply-source (buf)
   "Give BUF the voice and speed remembered for its file."
@@ -600,7 +616,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
   (kokoro--again))
 
 (defun kokoro-forget-source ()
-  "Forget the voice, speed and left-out text chosen for this file."
+  "Forget the voice, speed, left-out text and place remembered for this file."
   (interactive)
   (with-current-buffer (kokoro--settings-buffer)
     (let ((key (kokoro--source-key)))
@@ -653,6 +669,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
 (defun kokoro--clear ()
   "Forget what is being read and silence the server."
   (kokoro--send '(:cmd "stop"))
+  (kokoro--save-place)
   (dolist (e kokoro--pending)
     (set-marker (nth 1 e) nil)
     (set-marker (nth 2 e) nil))
@@ -753,11 +770,140 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
            (props (list :next (plist-get s :next)
                         :display (plist-get s :display)
                         :page (plist-get s :page)
+                        :skip (plist-get s :skip)
                         :progress (plist-get s :progress)))
            (start (with-current-buffer buf
                     (save-excursion (funcall move entry) (point)))))
       (with-current-buffer buf
         (kokoro--read start end props)))))
+
+;;;; Where reading got to
+
+(defvar kokoro--place-unsaved nil
+  "Time a place was noted that `kokoro-sources-file' does not have yet, or nil.")
+
+(defun kokoro--place-of (entry)
+  "Where the sentence of ENTRY is, as a plist `kokoro-resume' can go back to.
+It is (:page N :offset CHARS) in a PDF, (:chapter N :pos POS) in an EPUB
+and (:pos POS) elsewhere; nil for text that is not in the file, such as
+text selected on a PDF page."
+  (let ((display (plist-get kokoro--session :display))
+        (beg (nth 1 entry)))
+    (cond
+     ((plist-get kokoro--session :page)
+      (list :page (plist-get kokoro--session :page)
+            :offset (+ (or (plist-get kokoro--session :skip) 0)
+                       (with-current-buffer (marker-buffer beg)
+                         (- beg (point-min))))))
+     ((not (eq (marker-buffer beg) display)) nil)
+     (t
+      (with-current-buffer display
+        (append (and (derived-mode-p 'nov-mode) (list :chapter nov-documents-index))
+                (list :pos (marker-position beg)
+                      :percent (/ (* 100 (- beg (point-min)))
+                                  (max 1 (- (point-max) (point-min)))))))))))
+
+(defun kokoro--note-place (entry)
+  "Remember that the sentence of ENTRY is being read, for `kokoro-resume'.
+The sources file is written when reading stops, or once a minute."
+  (when-let* ((kokoro-remember-place)
+              (kokoro-sources-file)
+              (display (plist-get kokoro--session :display))
+              ((buffer-live-p display))
+              (key (with-current-buffer display (kokoro--source-key)))
+              (place (kokoro--place-of entry)))
+    (kokoro--put-source key :place (append place (list :time (float-time))))
+    (unless kokoro--place-unsaved
+      (setq kokoro--place-unsaved (float-time)))
+    (when (> (- (float-time) kokoro--place-unsaved) 60)
+      (kokoro--save-place))))
+
+(defun kokoro--save-place ()
+  "Write the places noted since the sources file was last written."
+  (when kokoro--place-unsaved
+    (setq kokoro--place-unsaved nil)
+    (kokoro--save-sources)))
+
+(add-hook 'kill-emacs-hook #'kokoro--save-place)
+
+(defun kokoro--describe-place (place)
+  "E.g. \"page 12\" or \"chapter 3, 40%\" for PLACE, and when it was read."
+  (concat (string-join
+           (delq nil (list (and (plist-get place :page) (format "page %d" (plist-get place :page)))
+                           (and (plist-get place :chapter)
+                                (format "chapter %d" (1+ (plist-get place :chapter))))
+                           (and (plist-get place :percent)
+                                (format "%d%%" (plist-get place :percent)))))
+           ", ")
+          (when-let* ((time (plist-get place :time)))
+            (format-time-string ", %Y-%m-%d %H:%M" time))))
+
+(defun kokoro--choose-place ()
+  "Ask for one of the files with a remembered place, the last read first."
+  (let* ((files (mapcar #'car
+                        (sort (cl-remove-if-not (lambda (e) (plist-get (cdr e) :place))
+                                                (copy-sequence (kokoro--sources)))
+                              (lambda (a b)
+                                (> (or (plist-get (plist-get (cdr a) :place) :time) 0)
+                                   (or (plist-get (plist-get (cdr b) :place) :time) 0))))))
+         (width (if files (apply #'max (mapcar (lambda (f) (length (file-name-nondirectory f)))
+                                               files))
+                  0))
+         (annotate (lambda (file)
+                     (concat (make-string (max 1 (- (+ width 2)
+                                                    (length (file-name-nondirectory file))))
+                                          ?\s)
+                             (propertize (kokoro--describe-place
+                                          (plist-get (cdr (assoc file (kokoro--sources))) :place))
+                                         'face 'completions-annotations)
+                             "  "
+                             (propertize (abbreviate-file-name (file-name-directory file))
+                                         'face 'shadow))))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      `(metadata (category . kokoro-place)
+                                 (annotation-function . ,annotate)
+                                 (display-sort-function . identity)
+                                 (cycle-sort-function . identity))
+                    (complete-with-action action files string pred)))))
+    (unless files
+      (user-error "Kokoro: no file has a place to resume yet"))
+    (completing-read "Resume reading: " table nil t)))
+
+(defun kokoro--resume-at (place)
+  "Read the current buffer on from PLACE, made by `kokoro--place-of'."
+  (cond
+   ((plist-get place :page)
+    (unless (derived-mode-p 'pdf-view-mode)
+      (user-error "Kokoro: the place is a PDF page, but this is not a PDF"))
+    (let ((page (min (plist-get place :page) (pdf-info-number-of-pages))))
+      (pdf-view-goto-page page)
+      (kokoro--read-pdf-page (current-buffer) page (plist-get place :offset))))
+   (t
+    (when-let* ((chapter (plist-get place :chapter))
+                ((derived-mode-p 'nov-mode))
+                ((< chapter (length nov-documents)))
+                ((/= chapter nov-documents-index)))
+      (nov-goto-document chapter))
+    (goto-char (min (plist-get place :pos) (point-max)))
+    (kokoro--read (point) (point-max) (kokoro--book-props)))))
+
+;;;###autoload
+(defun kokoro-resume (&optional choose)
+  "Read on from where reading got to in this file.
+In a buffer without a remembered place, or with a prefix argument
+(CHOOSE), choose one of the files read before, the last one first, and
+open it there."
+  (interactive "P")
+  (let* ((key (kokoro--source-key))
+         (place (and key (not choose)
+                     (plist-get (cdr (assoc key (kokoro--sources))) :place))))
+    (unless place
+      (let ((file (kokoro--choose-place)))
+        (find-file file)
+        (setq place (plist-get (cdr (assoc file (kokoro--sources))) :place))))
+    (message "Kokoro: reading on from %s" (kokoro--describe-place place))
+    (kokoro--resume-at place)))
 
 ;;;; Books
 
@@ -846,6 +992,7 @@ A sentence running onto the next page is finished before turning it."
       (kokoro--read (point-min) (point-max)
                     (list :display pdf
                           :page page
+                          :skip (or skip 0)
                           :next (lambda () (kokoro--pdf-next pdf page carry))
                           :progress (lambda () (format "page %d/%d" page pages)))))))
 
@@ -1188,6 +1335,7 @@ When DELETE-INPUT is non-nil, delete FILE once done."
   "r" #'kokoro-read-region
   "a" #'kokoro-read-buffer
   "." #'kokoro-read-paragraph
+  "c" #'kokoro-resume
   "SPC" #'kokoro-pause
   "s" #'kokoro-stop
   "n" #'kokoro-next

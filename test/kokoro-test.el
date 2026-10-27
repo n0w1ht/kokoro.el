@@ -307,6 +307,125 @@
         (kokoro-stop))
       (should-not (file-exists-p sources-file)))))
 
+;;;; Resuming
+
+(ert-deftest kokoro-test-resume-text-file ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (with-current-buffer (find-file-noselect book)
+        (kokoro-read-buffer)
+        (kokoro-test--play (car (car kokoro--pending)))
+        (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+        (kokoro-test--play (car (car kokoro--pending))) ; "Two."
+        (kokoro-stop)
+        (kill-buffer))
+      ;; Written when reading stopped, and found after a restart.
+      (setq kokoro--sources 'unread)
+      (with-current-buffer (find-file-noselect book)
+        (setq sent nil)
+        (kokoro-resume)
+        (should (equal (kokoro-test--spoken sent) '("Two." "Three.")))
+        (kokoro-stop)
+        (kill-buffer))
+      ;; Elsewhere it asks which file, and opens it there.
+      (with-temp-buffer
+        (setq sent nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (car (all-completions "" table)))))
+          (kokoro-resume))
+        (should (equal (buffer-file-name) (expand-file-name book)))
+        (should (equal (car (kokoro-test--spoken sent)) "Two."))
+        (kokoro-stop)
+        (kill-buffer (find-buffer-visiting book))))))
+
+(ert-deftest kokoro-test-resume-not-remembered ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      ;; Plain buffers, and kokoro-remember-place nil, keep no place.
+      (with-temp-buffer
+        (insert "One. Two.")
+        (kokoro-read-buffer)
+        (kokoro-test--play (car (car kokoro--pending)))
+        (kokoro-stop))
+      (let ((kokoro-remember-place nil))
+        (with-current-buffer (find-file-noselect book)
+          (kokoro-read-buffer)
+          (kokoro-test--play (car (car kokoro--pending)))
+          (kokoro-stop)
+          (kill-buffer)))
+      (should-not (kokoro--sources))
+      (should-error (kokoro-resume) :type 'user-error))))
+
+(ert-deftest kokoro-test-resume-epub-uses-nov-file-name ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (let ((chapters ["Chapter one. Ends here." "Chapter two. Middle part. Last part."])
+            (gone-to nil))
+        (with-temp-buffer
+          ;; Imitate nov: no buffer-file-name, the EPUB in nov-file-name.
+          (setq-local nov-file-name book)
+          (setq-local nov-documents (vector 'a 'b))
+          (setq-local nov-documents-index 1)
+          (insert (aref chapters 1))
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'nov-mode modes)))
+                    ((symbol-function 'nov-goto-document)
+                     (lambda (i)
+                       (setq gone-to i nov-documents-index i)
+                       (erase-buffer)
+                       (insert (aref chapters i)))))
+            (kokoro-read-buffer)
+            (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+            (kokoro-test--play (car (car kokoro--pending))) ; "Middle part."
+            (kokoro-stop)
+            (should (equal (plist-get (plist-get (cdr (assoc (abbreviate-file-name book)
+                                                              (kokoro--sources)))
+                                                  :place)
+                                      :chapter)
+                           1))
+            ;; Reopened at another chapter: it goes back to chapter two.
+            (nov-goto-document 0)
+            (setq sent nil)
+            (kokoro-resume)
+            (should (= gone-to 1))
+            (should (equal (car (kokoro-test--spoken sent)) "Middle part."))
+            (kokoro-stop)))))))
+
+(ert-deftest kokoro-test-resume-pdf-page ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (let ((pages '((1 . "Page one.") (2 . "Start of two. Then more. End.")))
+            (shown nil))
+        (cl-letf (((symbol-function 'pdf-info-number-of-pages) (lambda () 2))
+                  ((symbol-function 'pdf-view-goto-page) (lambda (p &rest _) (setq shown p)))
+                  ((symbol-function 'pdf-info-charlayout)
+                   (lambda (page)
+                     (mapcar (lambda (c) (list c '(0.1 0.5 0.2 0.52))) (alist-get page pages)))))
+          (with-current-buffer (find-file-noselect book)
+            (cl-letf (((symbol-function 'derived-mode-p)
+                       (lambda (&rest modes) (memq 'pdf-view-mode modes))))
+              (kokoro--read-pdf-page (current-buffer) 2)
+              (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+              (kokoro-test--play (car (car kokoro--pending))) ; "Then more."
+              (kokoro-stop)
+              (setq kokoro--sources 'unread)
+              (setq sent nil)
+              (kokoro-resume)
+              (should (= shown 2))
+              (should (equal (kokoro-test--spoken sent) '("Then more." "End.")))
+              ;; Going on from the resumed place notes the right offset.
+              (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+              (kokoro-test--play (car (car kokoro--pending))) ; "End."
+              (kokoro-stop)
+              (setq sent nil)
+              (kokoro-resume)
+              (should (equal (kokoro-test--spoken sent) '("End.")))
+              (kokoro-stop))
+            (kill-buffer)))))))
+
+;;;; Voice description
+
 (ert-deftest kokoro-test-voice-description ()
   (should (equal (kokoro--voice-description "af_heart") "American English, female"))
   (should (equal (kokoro--voice-description "bm_george") "British English, male"))
