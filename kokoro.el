@@ -1,6 +1,6 @@
 ;;; kokoro.el --- Read text aloud with the Kokoro-82M voice  -*- lexical-binding: t; -*-
 
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: multimedia, convenience
 
