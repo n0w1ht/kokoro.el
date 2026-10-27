@@ -60,6 +60,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'color)
 
 (declare-function image-mode-window-get "image-mode")
 (declare-function pdf-info-charlayout "ext:pdf-info")
@@ -68,6 +69,10 @@
 (declare-function pdf-view-active-region-p "ext:pdf-view")
 (declare-function pdf-view-active-region-text "ext:pdf-view")
 (declare-function pdf-view-display-region "ext:pdf-view")
+(declare-function pdf-view-display-image "ext:pdf-view")
+(declare-function pdf-view-create-image "ext:pdf-view")
+(declare-function pdf-view-image-size "ext:pdf-view")
+(declare-function pdf-info-renderpage-highlight "ext:pdf-info")
 (declare-function pdf-view-redisplay "ext:pdf-view")
 (declare-function nov-next-document "ext:nov")
 (declare-function nov-goto-document "ext:nov")
@@ -239,6 +244,22 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
 (defcustom kokoro-pdf-highlight t
   "When non-nil, highlight the sentence being read on the PDF page."
   :type 'boolean)
+
+(defcustom kokoro-pdf-highlight-style 'marker
+  "How the sentence being read is shown on a PDF page.
+`marker': a see-through color over the words, like a highlighter pen.
+`underline': a line under the words, which leaves them uncovered."
+  :type '(choice (const :tag "Highlighter pen" marker)
+                 (const :tag "Underline" underline)))
+
+(defcustom kokoro-pdf-highlight-color "#ffd84d"
+  "Color of the sentence being read on a PDF page."
+  :type 'color)
+
+(defcustom kokoro-pdf-highlight-opacity 0.22
+  "How strongly `kokoro-pdf-highlight-color' covers the words, 0.0 to 1.0.
+Lower is fainter.  Underlines are drawn at twice this, at most fully."
+  :type 'number)
 
 (defface kokoro-sentence '((t :inherit highlight))
   "Face of the sentence being read.")
@@ -1196,6 +1217,43 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
         (push (cdr box) (alist-get (car box) pages)))
       (mapcar (lambda (p) (cons (car p) (nreverse (cdr p)))) pages))))
 
+(defun kokoro--pdf-marks (boxes)
+  "The rectangles to draw for BOXES, by `kokoro-pdf-highlight-style'."
+  (if (eq kokoro-pdf-highlight-style 'underline)
+      (mapcar (pcase-lambda (`(,left ,top ,right ,bottom))
+                ;; A thin bar just under the line, a tenth of its height.
+                (let ((thick (max 0.002 (* 0.1 (- bottom top)))))
+                  (list left bottom right (+ bottom thick))))
+              boxes)
+    boxes))
+
+(defun kokoro--pdf-blend (color opacity)
+  "COLOR as it looks at OPACITY over the page, white (or black at night)."
+  (let ((paper (if (bound-and-true-p pdf-view-midnight-minor-mode) 0.0 1.0)))
+    (apply #'format "#%02x%02x%02x"
+           (mapcar (lambda (c) (round (* 255 (+ (* c opacity) (* paper (- 1 opacity))))))
+                   (if (string-match "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'" color)
+                       (mapcar (lambda (i) (/ (string-to-number (match-string i color) 16) 255.0))
+                               '(1 2 3))
+                     (color-name-to-rgb color))))))
+
+(defun kokoro--pdf-show-boxes (page boxes)
+  "Show PAGE in the selected window with BOXES highlighted."
+  (let* ((width (car (pdf-view-image-size)))
+         (opacity (min 1.0 (if (eq kokoro-pdf-highlight-style 'underline)
+                               (* 2 kokoro-pdf-highlight-opacity)
+                             kokoro-pdf-highlight-opacity)))
+         ;; pdf-tools outlines each box in a solid color: the one the
+         ;; see-through fill has, so there is no hard edge.
+         (edge (kokoro--pdf-blend kokoro-pdf-highlight-color opacity)))
+    (pdf-view-display-image
+     (pdf-view-create-image
+         (pdf-info-renderpage-highlight
+          page width nil
+          `(,kokoro-pdf-highlight-color ,edge ,opacity ,@(kokoro--pdf-marks boxes)))
+       :width width)
+     (and (bound-and-true-p pdf-view-roll-minor-mode) page))))
+
 (defun kokoro--pdf-highlight (pdf beg end)
   "Highlight the text from BEG to END on the pages of PDF on screen."
   (let ((boxes (with-current-buffer (marker-buffer beg) (kokoro--pdf-boxes beg end))))
@@ -1205,7 +1263,7 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
             (let* ((page (image-mode-window-get 'page win))
                    (here (alist-get page boxes)))
               (if here
-                  (pdf-view-display-region (cons page here) t)
+                  (kokoro--pdf-show-boxes page here)
                 (pdf-view-redisplay win)))
           (error (message "Kokoro: cannot highlight the page: %s"
                           (error-message-string err))))))))

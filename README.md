@@ -175,6 +175,8 @@ with `b` British English; the voice list shows which are female and male.
 | `kokoro-skip-rules`     | Parts not read, per major mode                             |
 | `kokoro-pdf-margins`    | Top and bottom of a PDF page left out, `(0.06 . 0.06)`; each PDF can have its own (`C-c t m`) |
 | `kokoro-pdf-highlight`  | Highlight the sentence on the PDF page                     |
+| `kokoro-pdf-highlight-style` | `marker` (see-through color, the default) or `underline` |
+| `kokoro-pdf-highlight-color`, `kokoro-pdf-highlight-opacity` | Its color, and how strongly it covers the words (0.22) |
 | `kokoro-header-line`    | Show the controls in the header line while reading         |
 | `kokoro-follow`         | Keep the sentence in view                                  |
 | `kokoro-continue`       | Go on to the next page or chapter                          |
