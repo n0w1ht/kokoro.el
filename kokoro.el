@@ -40,8 +40,8 @@
 ;;   C-c t ,     read the sentence again
 ;;   C-c t v     choose the voice         C-c t +/- faster/slower
 ;;   C-c t S     set the speed
-;;   C-c t w     narrate a file (txt, md, pdf, docx) into a WAV file
-;;   C-c t W     narrate the region into a WAV file
+;;   C-c t w     save a file (text, EPUB, PDF, Word) as MP3, Opus or WAV
+;;   C-c t W     save the region as audio
 ;;   C-c t h     show or hide the controls in the header line
 ;;   C-c t q     shut the speech server down (frees its memory)
 ;;
@@ -414,7 +414,14 @@ SAY is nil, or what to say instead of the text, for a skipped part."
               (goto-char (max (1+ beg) (min (point) stop)))
               (when (> (- (point) beg) kokoro-max-chars)
                 (goto-char (+ beg kokoro-max-chars))
-                (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2))))
+                (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2)))
+                ;; Not between the halves of a word hyphenated over lines.
+                (while (and (> (point) (+ beg (/ kokoro-max-chars 2)))
+                            (save-excursion
+                              (skip-chars-backward " \t\n")
+                              (memq (char-before) '(?- ?\u00ad ?\u2010 ?\u2011 ?¬))))
+                  (skip-chars-backward " \t\n")
+                  (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2)))))
               (skip-chars-backward " \t\n" (1+ beg)) ; e.g. before a skipped part
               (when (string-match-p "[[:alnum:]]" (buffer-substring-no-properties beg (point)))
                 (setq found (list beg (point) nil)))))))
@@ -557,11 +564,20 @@ A space is put between the words and a letter or number next to them."
                           "\\)\\(?:[^[:alnum:]]\\|$\\)")
                   (cdr entry) text t t 1)))))
 
+(defconst kokoro--line-hyphen
+  "\\([[:alpha:]]\\)[-\u00ad\u2010\u2011¬][ \t\r]*\n[ \t]*\\([[:alpha:]]\\)"
+  "Regexp matching a word hyphenated over two lines, around the break.
+The hyphen can be a soft or Unicode one, as PDFs often have, and spaces
+may come before or after the line break.")
+
 (defun kokoro-text-whitespace (text)
-  "Join words hyphenated over lines in TEXT and put it on one line."
+  "Join words hyphenated over lines in TEXT and put it on one line.
+\"Liber-\" at the end of a line and \"ation\" on the next are read
+\"Liberation\".  Soft hyphens elsewhere are dropped."
   (thread-last
     text
-    (replace-regexp-in-string "\\([[:alpha:]]\\)-\n\\([[:alpha:]]\\)" "\\1\\2")
+    (replace-regexp-in-string kokoro--line-hyphen "\\1\\2")
+    (string-replace "\u00ad" "")
     (replace-regexp-in-string "[ \t\n\r\f]+" " ")
     (string-trim)))
 
@@ -1121,7 +1137,7 @@ A sentence running onto the next page is finished before turning it."
         (goto-char (point-max))
         (skip-chars-backward " \t\n")
         (delete-region (point) (point-max))
-        (if (looking-back "[[:alpha:]]-" (max (point-min) (- (point) 2)))
+        (if (looking-back "[[:alpha:]][-\u00ad\u2010\u2011¬]" (max (point-min) (- (point) 2)))
             (delete-char -1)               ; word hyphenated over the pages
           (insert " "))
         (let ((joined (point)))
@@ -1480,49 +1496,201 @@ With a prefix argument (LOCAL), only in the buffer being read (or this one)."
   (interactive)
   (kokoro-faster -0.1))
 
+;;;; Saving audio
+
+(defcustom kokoro-audio-format (if (executable-find "ffmpeg") "mp3" "wav")
+  "Kind of audio file \\[kokoro-save-audio] makes, by its extension.
+\"wav\", or \"mp3\", \"opus\", \"m4a\" or \"flac\", which need ffmpeg.
+Opus files are the smallest; MP3 plays everywhere."
+  :type '(choice (const "mp3") (const "opus") (const "m4a") (const "flac") (const "wav")
+                 string))
+
+(defvar kokoro--narrations nil
+  "Narrations running in the background: lists (PROCESS NAME DONE TOTAL).")
+
+(defun kokoro--narrations-mode-line ()
+  "E.g. \" Narrating book.mp3 41%\" while audio is being saved."
+  (mapconcat (lambda (n)
+               (format " Narrating %s %d%%" (nth 1 n)
+                       (/ (* 100 (nth 2 n)) (max 1 (nth 3 n)))))
+             kokoro--narrations ""))
+
+(defconst kokoro--narrations-entry '(:eval (kokoro--narrations-mode-line)))
+
+(defun kokoro--export-sentences (beg end)
+  "The current buffer's text from BEG to END as it is read aloud.
+One sentence a line, as spoken, and an empty line after each paragraph."
+  (let ((pos beg) span lines)
+    (while (setq span (kokoro--next-sentence pos end))
+      (when (and lines
+                 (string-match-p "\n[ \t\r\f]*\n"
+                                 (buffer-substring-no-properties pos (nth 0 span))))
+        (push "" lines))
+      (let ((text (or (nth 2 span)
+                      (kokoro--text (buffer-substring-no-properties (nth 0 span) (nth 1 span))))))
+        (unless (string-empty-p text)
+          (push text lines)))
+      (setq pos (nth 1 span)))
+    (mapconcat #'identity (nreverse lines) "\n")))
+
+(defun kokoro--export-text (buf &optional beg end)
+  "BUF's text (or from BEG to END) as `kokoro--export-sentences' gives it.
+In a PDF, every page without its margins; in an EPUB, every chapter."
+  (kokoro--apply-source buf)
+  (let ((kokoro--session (list :display buf))) ; its own left-out text
+    (with-current-buffer buf
+      (cond
+       ((derived-mode-p 'pdf-view-mode)
+        (with-temp-buffer
+          (dotimes (i (with-current-buffer buf (pdf-info-number-of-pages)))
+            (kokoro--pdf-insert-page buf (1+ i))
+            (insert "\n"))
+          (kokoro--export-sentences (point-min) (point-max))))
+       ((and (derived-mode-p 'nov-mode) (not beg))
+        (let ((index nov-documents-index)
+              (here (point))
+              chapters)
+          (unwind-protect
+              (dotimes (i (length nov-documents))
+                (message "Kokoro: preparing chapter %d/%d..." (1+ i) (length nov-documents))
+                (nov-goto-document i)
+                (push (kokoro--export-sentences (point-min) (point-max)) chapters))
+            (nov-goto-document index)
+            (goto-char here))
+          (mapconcat #'identity (nreverse (delete "" chapters)) "\n\n")))
+       (t (kokoro--export-sentences (or beg (point-min)) (or end (point-max))))))))
+
+(defun kokoro--audio-name (name)
+  "NAME with the extension of `kokoro-audio-format'."
+  (concat (file-name-sans-extension name) "." kokoro-audio-format))
+
+(defun kokoro--narrate (args output voice speed &optional delete)
+  "Run the narrate script with ARGS into OUTPUT, with VOICE and SPEED.
+DELETE is a file to delete once it is done."
+  (let* ((process-environment (cons "PYTHONIOENCODING=utf-8" process-environment))
+         (name (file-name-nondirectory output))
+         (buffer (get-buffer-create "*kokoro-narrate*"))
+         (proc
+          (make-process
+           :name "kokoro-narrate"
+           :buffer buffer
+           :command (append (list kokoro-python kokoro-narrate-script) args
+                            (list "-o" output "-v" voice "-s" (number-to-string speed)))
+           :noquery t
+           :filter (lambda (proc string)
+                     (when (buffer-live-p (process-buffer proc))
+                       (with-current-buffer (process-buffer proc)
+                         (goto-char (point-max))
+                         (insert string)))
+                     (when-let* ((entry (assq proc kokoro--narrations))
+                                 ((string-match "\\(?:.*\n\\)*\\[\\([0-9]+\\)/\\([0-9]+\\)\\]"
+                                                string)))
+                       (setf (nth 2 entry) (string-to-number (match-string 1 string))
+                             (nth 3 entry) (string-to-number (match-string 2 string)))
+                       (force-mode-line-update t)))
+           :sentinel (lambda (proc _event)
+                       (unless (process-live-p proc)
+                         (setq kokoro--narrations (assq-delete-all proc kokoro--narrations))
+                         (force-mode-line-update t)
+                         (when delete
+                           (ignore-errors (delete-file delete)))
+                         (if (zerop (process-exit-status proc))
+                             (message "Kokoro: saved %s" output)
+                           (message "Kokoro: saving %s failed; see *kokoro-narrate*"
+                                    name)))))))
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (insert (format "\n--- %s, %s ---\n" output (format-time-string "%F %T"))))
+    (push (list proc name 0 1) kokoro--narrations)
+    (unless (member kokoro--narrations-entry global-mode-string)
+      (setq global-mode-string (append (or global-mode-string '("")) (list kokoro--narrations-entry))))
+    (message "Kokoro: saving %s in the background (progress in the mode line)..." name)
+    proc))
+
+(defun kokoro--narrate-text (text output voice speed)
+  "Narrate TEXT, prepared by `kokoro--export-text', into OUTPUT."
+  (when (string-blank-p text)
+    (user-error "Kokoro: there is nothing to read here"))
+  (let ((lines (make-temp-file "kokoro-" nil ".txt")))
+    (let ((coding-system-for-write 'utf-8-unix))
+      (write-region text nil lines nil 'silent))
+    (kokoro--narrate (list "--lines" lines) output voice speed lines)))
+
+(defun kokoro--file-buffer (file)
+  "A buffer showing FILE the way Emacs reads it, and whether it was made for this.
+Return (BUFFER . NEW)."
+  (let ((key (abbreviate-file-name (expand-file-name file))))
+    (or (cl-loop for buf in (buffer-list)
+                 when (equal (with-current-buffer buf (kokoro--source-key)) key)
+                 return (cons buf nil))
+        (cons (find-file-noselect file) t))))
+
 ;;;###autoload
-(defun kokoro-save-audio (file output &optional delete-input)
-  "Narrate FILE (txt, md, pdf or docx) into the WAV file OUTPUT, in the background.
-When DELETE-INPUT is non-nil, delete FILE once done."
+(defun kokoro-save-audio (file output)
+  "Narrate FILE into the audio file OUTPUT, in the background.
+The text is cleaned the way it is read aloud: `kokoro-pronunciations',
+left-out text, PDF margins, skipped code blocks and so on, and read with
+the voice and speed of the file.  FILE can be any text file, an EPUB
+(with nov.el) or a PDF (with pdf-tools); Word files are read by the
+script.  The kind of audio file is OUTPUT's extension; see
+`kokoro-audio-format'."
   (interactive
    (let* ((file (read-file-name "Narrate file: " nil nil t
-                                (and buffer-file-name (file-name-nondirectory buffer-file-name))))
+                                (when-let* ((key (kokoro--source-key)))
+                                  (file-name-nondirectory key))))
           (output (read-file-name "Save audio as: " (file-name-directory file) nil nil
-                                  (concat (file-name-base file) ".wav"))))
+                                  (kokoro--audio-name (file-name-nondirectory file)))))
      (list (expand-file-name file) (expand-file-name output))))
-  (let* ((process-environment (cons "PYTHONIOENCODING=utf-8" process-environment))
-         (remembered (cdr (assoc (abbreviate-file-name (expand-file-name file))
-                                 (and kokoro-sources-file (kokoro--sources)))))
-         (voice (or (plist-get remembered :voice) (kokoro--voice)))
-         (speed (or (plist-get remembered :speed) (kokoro--speed))))
-    (make-process
-     :name "kokoro-narrate"
-     :buffer (get-buffer-create "*kokoro-narrate*")
-     :command (list kokoro-python kokoro-narrate-script file "-o" output
-                    "-v" voice "-s" (number-to-string speed))
-     :noquery t
-     :sentinel (lambda (proc _event)
-                 (unless (process-live-p proc)
-                   (when delete-input
-                     (ignore-errors (delete-file file)))
-                   (if (zerop (process-exit-status proc))
-                       (message "Kokoro: saved %s" output)
-                     (message "Kokoro: narration failed; see *kokoro-narrate*"))))))
-  (message "Kokoro: narrating %s in the background..."
-           (if delete-input "the region" (file-name-nondirectory file))))
+  (let* ((ext (downcase (or (file-name-extension file) "")))
+         (opened (unless (equal ext "docx") (kokoro--file-buffer file)))
+         (buf (car opened)))
+    (unwind-protect
+        (cond
+         ((or (null buf)
+              (and (equal ext "pdf")
+                   (not (with-current-buffer buf (derived-mode-p 'pdf-view-mode)))))
+          ;; Word, or a PDF without pdf-tools: the script reads it.
+          (let ((remembered (cdr (assoc (abbreviate-file-name (expand-file-name file))
+                                        (and kokoro-sources-file (kokoro--sources))))))
+            (kokoro--narrate (list file) output
+                             (or (plist-get remembered :voice) kokoro-voice)
+                             (float (or (plist-get remembered :speed) kokoro-speed)))))
+         ((and (equal ext "epub") (not (with-current-buffer buf (derived-mode-p 'nov-mode))))
+          (user-error "Kokoro: saving an EPUB needs nov.el"))
+         (t
+          (let ((text (kokoro--export-text buf)))
+            (kokoro--narrate-text text output
+                                  (buffer-local-value 'kokoro-voice buf)
+                                  (float (buffer-local-value 'kokoro-speed buf))))))
+      (when (cdr opened)
+        (kill-buffer buf)))))
 
 ;;;###autoload
 (defun kokoro-save-region-audio (beg end output)
-  "Narrate the text between BEG and END into the WAV file OUTPUT."
+  "Narrate the text between BEG and END into the audio file OUTPUT.
+In a PDF, narrate the selected text."
   (interactive
-   (list (region-beginning) (region-end)
-         (expand-file-name (read-file-name "Save audio as: " nil nil nil
-                                           (concat (file-name-base (or buffer-file-name (buffer-name)))
-                                                   ".wav")))))
-  (let ((text-file (make-temp-file "kokoro-" nil ".txt")))
-    (let ((coding-system-for-write 'utf-8))
-      (write-region beg end text-file))
-    (kokoro-save-audio text-file output t)))
+   (progn
+     (unless (or (use-region-p)
+                 (and (derived-mode-p 'pdf-view-mode) (pdf-view-active-region-p)))
+       (user-error "Kokoro: select the text to save first"))
+     (list (and (use-region-p) (region-beginning)) (and (use-region-p) (region-end))
+           (expand-file-name
+            (read-file-name "Save audio as: " nil nil nil
+                            (kokoro--audio-name
+                             (file-name-nondirectory
+                              (or (kokoro--source-key) (buffer-name)))))))))
+  (kokoro--apply-source (current-buffer))
+  (let* ((buf (current-buffer))
+         (text (if beg
+                   (kokoro--export-text buf beg end)
+                 (with-temp-buffer
+                   (insert (string-join (with-current-buffer buf (pdf-view-active-region-text))
+                                        "\n"))
+                   (let ((kokoro--session (list :display buf)))
+                     (kokoro--export-sentences (point-min) (point-max)))))))
+    (kokoro--narrate-text text output (buffer-local-value 'kokoro-voice buf)
+                          (float (buffer-local-value 'kokoro-speed buf)))))
 
 (defun kokoro-quit ()
   "Shut the speech server down."

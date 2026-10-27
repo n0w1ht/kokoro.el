@@ -18,6 +18,8 @@ Read buffers, EPUB books (nov.el) and PDFs (pdf-tools) aloud in Emacs with the
   as "times 10 to the 9 per liter", "150–400" as "150 to 400", "≥", "±", "→",
   "°C", Greek letters and subscripts; superscript reference numbers are left
   out (`kokoro-symbols`, `kokoro-text-symbols`).
+- A word hyphenated over two lines ("Liber-" / "ation") is read as one word,
+  also with the soft and Unicode hyphens PDFs often have.
 - Words the voice gets wrong can be given a pronunciation
   (`kokoro-pronunciations`, which comes with common medical units and dosing
   abbreviations), and any function can be added to `kokoro-text-functions`.
@@ -83,8 +85,8 @@ Then in your init file:
 | `C-c t v`   | `kokoro-select-voice`       | Choose a voice (applies from the current sentence)        |
 | `C-c t S`   | `kokoro-set-speed`          | Set the speed, 0.5 to 2.0                                 |
 | `C-c t +/-` | `kokoro-faster/slower`      | Change speed by 0.1                                       |
-| `C-c t w`   | `kokoro-save-audio`         | Narrate a txt/md/pdf/docx file into a WAV, in background  |
-| `C-c t W`   | `kokoro-save-region-audio`  | Narrate the region into a WAV                             |
+| `C-c t w`   | `kokoro-save-audio`         | Save a file (text, Org, Markdown, EPUB, PDF, Word) as MP3/Opus/WAV, in the background |
+| `C-c t W`   | `kokoro-save-region-audio`  | Save the region (in a PDF, the selection) as audio        |
 | `C-c t m`   | `kokoro-set-pdf-margins`    | Set how much of the top and bottom of this PDF is left out |
 | `C-c t x`   | `kokoro-skip-text`          | Leave out text matching a regexp, in this file            |
 | `C-c t X`   | `kokoro-unskip-text`        | Read text matching one of this file's regexps again       |
@@ -107,6 +109,21 @@ restarting Emacs. Pressed in a buffer that has no place, or with `C-u`, it
 lists the files you have read, the last one first, and opens the one you pick
 where you stopped. Places are kept in `kokoro-sources-file`; set
 `kokoro-remember-place` to nil to keep none.
+
+## Saving audio
+
+`C-c t w` saves a whole file as audio to listen to elsewhere, e.g. on your
+phone; `C-c t W` saves the region. The text is cleaned exactly as when it is
+read aloud (pronunciations, symbols, left-out text, PDF margins, skipped code
+blocks), with the file's own voice and speed. EPUBs need nov.el, and PDFs are
+read through pdf-tools when it is installed (otherwise by `pypdf`); Word files
+are read by the script.
+
+It saves MP3 when ffmpeg is on PATH (`winget install Gyan.FFmpeg`), otherwise
+WAV; set `kokoro-audio-format` to `"opus"` for the smallest files. It runs in
+the background with its progress in the mode line ("Narrating book.mp3 41%"),
+and the details go to the `*kokoro-narrate*` buffer. A whole book takes a while
+on the CPU, so it is best started before a break.
 
 ## PDF margins
 
@@ -140,7 +157,7 @@ well:
 ```
 
 The text stays in the buffer and in the highlight; it is only not spoken.
-WAV export (`C-c t w`) does not leave it out. Voices starting with `a` are American English and
+Saved audio (`C-c t w`) leaves it out too. Voices starting with `a` are American English and
 with `b` British English; the voice list shows which are female and male.
 
 ## Options
@@ -161,6 +178,7 @@ with `b` British English; the voice list shows which are female and male.
 | `kokoro-header-line`    | Show the controls in the header line while reading         |
 | `kokoro-follow`         | Keep the sentence in view                                  |
 | `kokoro-continue`       | Go on to the next page or chapter                          |
+| `kokoro-audio-format`   | Kind of file `C-c t w` saves: "mp3", "opus", "m4a", "flac", "wav" |
 | `kokoro-lookahead`, `kokoro-max-chars` | How far ahead to synthesize; longest piece  |
 
 The face `kokoro-sentence` is used for the highlight in text buffers.
@@ -177,8 +195,8 @@ Example: add your own words.
 
 - `kokoro.el`: the package
 - `kokoro_server.py`: the speech server Emacs starts
-- `narrate.py`: narrates a txt, md, pdf or docx file into a WAV (`C-c t w`);
-  it also works on its own: `python narrate.py book.pdf -v bm_george`
+- `narrate.py`: turns text into an audio file (`C-c t w`); it also works on its
+  own: `python narrate.py book.pdf -v bm_george -o book.mp3`
 
 ## License
 

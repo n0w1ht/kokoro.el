@@ -530,6 +530,67 @@
           (should-not (plist-get kokoro--session :prev))
           (kokoro-stop))))))
 
+;;;; Saving audio
+
+(defmacro kokoro-test--capturing-narration (&rest body)
+  "Run BODY with the narrate script replaced; `narrated' holds (ARGS TEXT VOICE SPEED)."
+  (declare (indent 0))
+  `(let (narrated)
+     (cl-letf (((symbol-function 'kokoro--narrate)
+                (lambda (args _output voice speed &optional _delete)
+                  (push (list args
+                              (and (equal (car args) "--lines")
+                                   (with-temp-buffer
+                                     (insert-file-contents (cadr args))
+                                     (buffer-string)))
+                              voice speed)
+                        narrated)
+                  (when (equal (car args) "--lines")
+                    (delete-file (cadr args))))))
+       ,@body)))
+
+(ert-deftest kokoro-test-export-is-cleaned-like-reading ()
+  (kokoro-test--capturing-narration
+    (kokoro-test--with-sources
+      (let ((org (make-temp-file "kokoro-notes-" nil ".org"
+                                 (concat "Give 5 mg daily. Ref {1.2} here.\n\n"
+                                         "#+begin_src elisp\n(x)\n#+end_src\n"
+                                         "After ≥ 2 doses.\n"))))
+        (unwind-protect
+            (progn
+              (with-current-buffer (find-file-noselect org)
+                (kokoro-skip-text "{[0-9.]+}")
+                (kokoro-select-voice "bm_george" t)
+                (kill-buffer))
+              (kokoro-save-audio org "/tmp/out.mp3")
+              (pcase-let ((`(,args ,text ,voice ,speed) (car narrated)))
+                (should (equal (car args) "--lines"))
+                (should (equal text (concat "Give 5 milligrams daily.\nRef here.\n\n"
+                                            "Code block.\nAfter greater than or equal to 2 doses.")))
+                (should (equal voice "bm_george"))
+                (should (= speed 1.0)))
+              ;; The file it opened is closed again.
+              (should-not (find-buffer-visiting org)))
+          (delete-file org))))))
+
+(ert-deftest kokoro-test-export-region-and-word ()
+  (kokoro-test--capturing-narration
+    (with-temp-buffer
+      (insert "Skip this. Read this one. And this.")
+      (goto-char (point-min))
+      (search-forward "Read")
+      (kokoro-save-region-audio (match-beginning 0) (point-max) "/tmp/r.wav")
+      (should (equal (nth 1 (car narrated)) "Read this one.\nAnd this.")))
+    ;; Word files go to the script as they are.
+    (kokoro-save-audio "/tmp/report.docx" "/tmp/report.mp3")
+    (should (equal (car (car narrated)) '("/tmp/report.docx")))))
+
+(ert-deftest kokoro-test-narration-progress ()
+  (let ((kokoro--narrations (list (list 'proc "book.mp3" 41 100))))
+    (should (equal (kokoro--narrations-mode-line) " Narrating book.mp3 41%")))
+  (should (equal (kokoro--audio-name "notes.org")
+                 (concat "notes." kokoro-audio-format))))
+
 ;;;; Voice description
 
 (ert-deftest kokoro-test-voice-description ()
@@ -646,6 +707,24 @@
                   (kill-buffer)))
             (delete-file other)))
         (should-error (kokoro-set-pdf-margins 60 50) :type 'user-error)))))
+
+(ert-deftest kokoro-test-hyphenated-over-lines ()
+  ;; "Liber-" at the end of a line and "ation" on the next: one word.
+  (dolist (text (list "The Liber-\nation of oxygen."
+                      "The Liber- \n   ation of oxygen."     ; spaces around the break
+                      "The Liber­\nation of oxygen."    ; soft hyphen, as in PDFs
+                      "The Liber‐\nation of oxygen."))  ; Unicode hyphen
+    (should (equal (kokoro-test--sentences text) (list text)))
+    (should (equal (kokoro--text text) "The Liberation of oxygen.")))
+  (should (equal (kokoro--text "Liber­ation") "Liberation"))
+  ;; Hyphens within a line, and numbers, stay.
+  (should (equal (kokoro--text "A well-known one-\nliner") "A well-known oneliner"))
+  ;; A long sentence is not cut between the halves.
+  (let* ((kokoro-max-chars 40)
+         (parts (kokoro-test--sentences
+                 (concat (mapconcat #'identity (make-list 6 "word") " ") " liber-\nation "
+                         (mapconcat #'identity (make-list 6 "word") " ")))))
+    (should-not (cl-some (lambda (p) (string-match-p "-\\'" (string-trim p))) parts))))
 
 (ert-deftest kokoro-test-pdf-sentence-carried-over ()
   (kokoro-test--with-fake-server

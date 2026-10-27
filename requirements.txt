@@ -2,6 +2,6 @@ kokoro>=0.9.4
 numpy
 sounddevice
 soundfile
-# only for WAV export of PDF and Word files (C-c t w)
+# only for saving PDF (without pdf-tools) and Word files as audio (C-c t w)
 pypdf
 python-docx
