@@ -1,6 +1,6 @@
 ;;; kokoro.el --- Read text aloud with the Kokoro-82M voice  -*- lexical-binding: t; -*-
 
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: multimedia, convenience
 
@@ -31,12 +31,17 @@
 ;;               current one on
 ;;   C-c t r     read the region          C-c t a   read the whole buffer
 ;;   C-c t .     read the paragraph
+;;   C-c t c     read on from where you stopped in this file (C-u: in
+;;               another file read before)
 ;;   C-c t SPC   pause or resume          C-c t s   stop
-;;   C-c t n/p   skip to the next/previous sentence
+;;   C-c t n/p   skip to the next/previous sentence, also across PDF
+;;               pages and EPUB chapters
+;;   C-c t ]/[   skip to the next/previous paragraph (PDF: page)
+;;   C-c t ,     read the sentence again
 ;;   C-c t v     choose the voice         C-c t +/- faster/slower
 ;;   C-c t S     set the speed
-;;   C-c t w     narrate a file (txt, md, pdf, docx) into a WAV file
-;;   C-c t W     narrate the region into a WAV file
+;;   C-c t w     save a file (text, EPUB, PDF, Word) as MP3, Opus or WAV
+;;   C-c t W     save the region as audio
 ;;   C-c t h     show or hide the controls in the header line
 ;;   C-c t q     shut the speech server down (frees its memory)
 ;;
@@ -55,6 +60,7 @@
 
 (require 'cl-lib)
 (require 'subr-x)
+(require 'color)
 
 (declare-function image-mode-window-get "image-mode")
 (declare-function pdf-info-charlayout "ext:pdf-info")
@@ -63,10 +69,17 @@
 (declare-function pdf-view-active-region-p "ext:pdf-view")
 (declare-function pdf-view-active-region-text "ext:pdf-view")
 (declare-function pdf-view-display-region "ext:pdf-view")
+(declare-function pdf-view-display-image "ext:pdf-view")
+(declare-function pdf-view-create-image "ext:pdf-view")
+(declare-function pdf-view-image-size "ext:pdf-view")
+(declare-function pdf-info-renderpage-highlight "ext:pdf-info")
 (declare-function pdf-view-redisplay "ext:pdf-view")
 (declare-function nov-next-document "ext:nov")
+(declare-function nov-goto-document "ext:nov")
+(declare-function nov-previous-document "ext:nov")
 (defvar nov-documents)
 (defvar nov-documents-index)
+(defvar nov-file-name)
 
 ;;;; Options
 
@@ -119,6 +132,11 @@ a prefix argument, and forgotten with `kokoro-forget-source'.
 When nil, nothing is remembered."
   :type '(choice file (const :tag "Do not remember" nil)))
 
+(defcustom kokoro-remember-place t
+  "When non-nil, remember where reading got to in each file.
+\\[kokoro-resume] reads on from there.  It is kept in `kokoro-sources-file'."
+  :type 'boolean)
+
 (defcustom kokoro-follow t
   "When non-nil, scroll so the sentence being read stays in view."
   :type 'boolean)
@@ -147,8 +165,8 @@ added with \\[kokoro-skip-text]."
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v))))
 
 (defcustom kokoro-text-functions
-  '(kokoro-text-remove kokoro-text-links kokoro-text-markup kokoro-text-pronounce
-    kokoro-text-whitespace)
+  '(kokoro-text-remove kokoro-text-links kokoro-text-symbols kokoro-text-markup
+    kokoro-text-pronounce kokoro-text-whitespace)
   "Functions that turn a sentence from the buffer into what is spoken.
 Each takes a string and returns a string; they run in order."
   :type '(repeat function))
@@ -160,13 +178,35 @@ Each takes a string and returns a string; they run in order."
     ("mg/dL" . "milligrams per deciliter") ("mmol/L" . "millimoles per liter")
     ("mg/kg" . "milligrams per kilogram")
     ("mg" . "milligrams") ("mcg" . "micrograms") ("µg" . "micrograms")
-    ("kg" . "kilograms") ("mL" . "milliliters") ("dL" . "deciliters")
+    ("ng" . "nanograms") ("kg" . "kilograms")
+    ("mL" . "milliliters") ("µL" . "microliters") ("dL" . "deciliters")
+    ("mmol" . "millimoles") ("µmol" . "micromoles") ("nmol" . "nanomoles")
+    ("mEq" . "milliequivalents") ("µm" . "micrometers")
+    ("mm" . "millimeters") ("cm" . "centimeters")
     ("mmHg" . "millimeters of mercury")
     ("b.i.d." . "twice a day") ("t.i.d." . "three times a day")
     ("q.i.d." . "four times a day") ("p.r.n." . "as needed") ("p.o." . "by mouth"))
   "How to say words the voice gets wrong: an alist (TEXT . SPOKEN).
 TEXT matches as a whole word, with case; earlier entries are tried first,
 so put longer ones (\"mg/dL\") before shorter ones (\"mg\")."
+  :type '(alist :key-type string :value-type string))
+
+(defcustom kokoro-symbols
+  '(("-->" . "leads to") ("->" . "leads to")
+    ("≥" . "greater than or equal to") ("≤" . "less than or equal to")
+    ("≠" . "not equal to") ("≈" . "approximately") ("±" . "plus or minus")
+    ("→" . "leads to") ("←" . "comes from") ("↔" . "and back")
+    ("↑" . "increased") ("↓" . "decreased") ("×" . "times") ("÷" . "divided by")
+    ("°C" . "degrees Celsius") ("°F" . "degrees Fahrenheit") ("°" . "degrees")
+    ("‰" . "per thousand") ("∞" . "infinity") ("√" . "square root of")
+    ("α" . "alpha") ("β" . "beta") ("γ" . "gamma") ("δ" . "delta") ("ε" . "epsilon")
+    ("ζ" . "zeta") ("η" . "eta") ("θ" . "theta") ("κ" . "kappa") ("λ" . "lambda")
+    ("μ" . "mu") ("ν" . "nu") ("ξ" . "xi") ("π" . "pi") ("ρ" . "rho") ("σ" . "sigma")
+    ("τ" . "tau") ("φ" . "phi") ("χ" . "chi") ("ψ" . "psi") ("ω" . "omega")
+    ("Δ" . "delta") ("Σ" . "sum of") ("Ω" . "omega"))
+  "How to say symbols: an alist (SYMBOL . SPOKEN), used by `kokoro-text-symbols'.
+SYMBOL matches anywhere, not only as a word.  Earlier entries are tried
+first."
   :type '(alist :key-type string :value-type string))
 
 (defcustom kokoro-abbreviations
@@ -205,6 +245,22 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
   "When non-nil, highlight the sentence being read on the PDF page."
   :type 'boolean)
 
+(defcustom kokoro-pdf-highlight-style 'marker
+  "How the sentence being read is shown on a PDF page.
+`marker': a see-through color over the words, like a highlighter pen.
+`underline': a line under the words, which leaves them uncovered."
+  :type '(choice (const :tag "Highlighter pen" marker)
+                 (const :tag "Underline" underline)))
+
+(defcustom kokoro-pdf-highlight-color "#ffd84d"
+  "Color of the sentence being read on a PDF page."
+  :type 'color)
+
+(defcustom kokoro-pdf-highlight-opacity 0.22
+  "How strongly `kokoro-pdf-highlight-color' covers the words, 0.0 to 1.0.
+Lower is fainter.  Underlines are drawn at twice this, at most fully."
+  :type 'number)
+
 (defface kokoro-sentence '((t :inherit highlight))
   "Face of the sentence being read.")
 
@@ -219,9 +275,11 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
   "What is being read: a plist.
 :buffer, :pos and :end say where the text is.  :display is the buffer
 the reader sees (the PDF for a PDF page), and :page the PDF page being
-read.  :next is nil or a function
-that starts the following page or chapter and returns non-nil when it
-did.  :progress is nil or a function returning where the reading is.")
+read, with :skip characters at its start left out.  :next is nil or a
+function that starts the following page or chapter and returns non-nil
+when it did.  :prev is nil or a function that starts the page or chapter
+before, from its start, or from its last sentence when called with
+`last'.  :progress is nil or a function returning where the reading is.")
 (defvar kokoro--pending nil
   "Sentences handed to the server, oldest first: lists (ID BEG END).")
 (defvar kokoro--current nil "Entry of `kokoro--pending' being spoken.")
@@ -293,6 +351,7 @@ did.  :progress is nil or a function returning where the reading is.")
       ("start"
        (when-let* ((entry (assq id kokoro--pending)))
          (setq kokoro--current entry)
+         (kokoro--note-place entry)
          (kokoro--show entry)))
       ("end"
        (when (assq id kokoro--pending)
@@ -376,11 +435,26 @@ SAY is nil, or what to say instead of the text, for a skipped part."
               (goto-char (max (1+ beg) (min (point) stop)))
               (when (> (- (point) beg) kokoro-max-chars)
                 (goto-char (+ beg kokoro-max-chars))
-                (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2))))
+                (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2)))
+                ;; Not between the halves of a word hyphenated over lines.
+                (while (and (> (point) (+ beg (/ kokoro-max-chars 2)))
+                            (save-excursion
+                              (skip-chars-backward " \t\n")
+                              (memq (char-before) '(?- ?\u00ad ?\u2010 ?\u2011 ?¬))))
+                  (skip-chars-backward " \t\n")
+                  (skip-chars-backward "^ \t\n" (+ beg (/ kokoro-max-chars 2)))))
               (skip-chars-backward " \t\n" (1+ beg)) ; e.g. before a skipped part
               (when (string-match-p "[[:alnum:]]" (buffer-substring-no-properties beg (point)))
                 (setq found (list beg (point) nil)))))))
       found)))
+
+(defun kokoro--last-sentence-start (beg end)
+  "Where the last sentence between BEG and END begins, or BEG."
+  (let ((pos beg) last span)
+    (while (setq span (kokoro--next-sentence pos end))
+      (setq last (car span)
+            pos (nth 1 span)))
+    (or last beg)))
 
 (defun kokoro--sentence-start ()
   "Position where the sentence at point begins."
@@ -417,6 +491,87 @@ SAY is nil, or what to say instead of the text, for a skipped part."
     (replace-regexp-in-string "\\[\\([^]]*\\)\\]([^)]*)" "\\1")
     (replace-regexp-in-string "https?://[^ \t\n]+" "link")))
 
+(defconst kokoro--superscripts "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺"
+  "Superscript characters; the same position in \"0123456789-+\" is what they are.")
+
+(defconst kokoro--subscripts "₀₁₂₃₄₅₆₇₈₉₋₊"
+  "Subscript characters, like `kokoro--superscripts'.")
+
+(defun kokoro--unsuperscript (string &optional chars)
+  "STRING with the superscripts (or CHARS) in it made plain digits and signs."
+  (apply #'string (mapcar (lambda (c)
+                            (if-let* ((i (seq-position (or chars kokoro--superscripts) c)))
+                                (aref "0123456789-+" i)
+                              c))
+                          string)))
+
+(defun kokoro-text-symbols (text)
+  "Say the symbols, powers, ranges and comparisons in TEXT in words.
+\"×10⁹/L\" becomes \"times 10 to the 9 per liter\", \"5–10\" \"5 to 10\",
+\"> 140\" \"greater than 140\" and \"m²\" \"square meters\".  Superscript
+numbers after a word, mostly references, are left out.  Other symbols
+are said as `kokoro-symbols' says."
+  (let ((case-fold-search nil)
+        (sup (concat "[" kokoro--superscripts "]+")))
+    (cl-flet ((sub (regexp rep &optional subexp)
+                (setq text (replace-regexp-in-string regexp rep text t nil subexp))))
+      ;; The Greek mu typed for the micro sign, before units.
+      (sub "μ\\(g\\|L\\|l\\|m\\|mol\\|M\\)\\b" "µ\\1")
+      ;; Powers: 10⁹, 10^9, 10^-3.
+      (sub (concat "\\b10\\(" sup "\\)")
+           (lambda (m) (concat "10 to the " (kokoro--unsuperscript (match-string 1 m)))))
+      (sub "\\b10\\^\\([-+]?[0-9]+\\)" "10 to the \\1")
+      ;; Areas and volumes.
+      (sub "\\b\\(k?m\\|[cmµ]m\\)\\([²³]\\)"
+           (lambda (m)
+             (concat (if (equal (match-string 2 m) "²") "square " "cubic ")
+                     (pcase (match-string 1 m)
+                       ("m" "meters") ("km" "kilometers") ("cm" "centimeters")
+                       ("mm" "millimeters") ("µm" "micrometers")))))
+      ;; Superscripts left after a word or a closing mark: references.
+      (sub (concat "\\([[:alpha:].,;:)]\\)" sup "\\(?:[,–-]" sup "\\)*") "\\1")
+      ;; Per unit of time or volume: "beats/min", "×10⁹/L".
+      (sub "\\([[:alnum:]]\\)/\\(L\\|min\\|h\\|hr\\|day\\|d\\|wk\\|kg\\|s\\)\\b"
+           (lambda (m)
+             (concat (match-string 1 m) " per "
+                     (pcase (match-string 2 m)
+                       ("L" "liter") ("min" "minute") ((or "h" "hr") "hour")
+                       ((or "day" "d") "day") ("wk" "week") ("kg" "kilogram")
+                       ("s" "second")))))
+      ;; Ranges of numbers, but not dates like 2026-10-27.
+      (sub "\\(?:^\\|[^-–0-9.]\\)[0-9]+\\(?:\\.[0-9]+\\)?\\([–-]\\)[0-9]+\\(?:\\.[0-9]+\\)?\\(?:$\\|[^-–0-9]\\)"
+           " to " 1)
+      ;; Comparisons, not quotes or arrows: "> 140", "(<0.5)".
+      (sub "\\(?:^\\|[ (]\\)\\(>=?\\|<=?\\)[ \t]*[0-9.]"
+           (lambda (m)
+             (pcase (match-string 1 m)
+               (">" "greater than ") ("<" "less than ")
+               (">=" "greater than or equal to ") ("<=" "less than or equal to ")))
+           1)
+      ;; Subscripts: "α₁" is "alpha 1", "CO₂" "CO 2".
+      (sub (concat "[" kokoro--subscripts "]+")
+           (lambda (m) (concat " " (kokoro--unsuperscript m kokoro--subscripts))))
+      (sub " = " " equals ")
+      (kokoro--say-symbols text))))
+
+(defun kokoro--say-symbols (text)
+  "Replace the symbols of `kokoro-symbols' in TEXT.
+A space is put between the words and a letter or number next to them."
+  (with-temp-buffer
+    (insert text)
+    (pcase-dolist (`(,symbol . ,spoken) kokoro-symbols)
+      (goto-char (point-min))
+      (while (search-forward symbol nil t)
+        (replace-match spoken t t)
+        (let ((end (point)))
+          (when (and (char-after) (string-match-p "[[:alnum:]]" (string (char-after))))
+            (insert " "))
+          (goto-char (- end (length spoken)))
+          (when (and (char-before) (string-match-p "[[:alnum:]]" (string (char-before))))
+            (insert " "))
+          (goto-char end))))
+    (buffer-string)))
+
 (defun kokoro-text-markup (text)
   "Remove markup characters from TEXT."
   (replace-regexp-in-string "[*=~`#|>]+" " " text))
@@ -430,11 +585,20 @@ SAY is nil, or what to say instead of the text, for a skipped part."
                           "\\)\\(?:[^[:alnum:]]\\|$\\)")
                   (cdr entry) text t t 1)))))
 
+(defconst kokoro--line-hyphen
+  "\\([[:alpha:]]\\)[-\u00ad\u2010\u2011¬][ \t\r]*\n[ \t]*\\([[:alpha:]]\\)"
+  "Regexp matching a word hyphenated over two lines, around the break.
+The hyphen can be a soft or Unicode one, as PDFs often have, and spaces
+may come before or after the line break.")
+
 (defun kokoro-text-whitespace (text)
-  "Join words hyphenated over lines in TEXT and put it on one line."
+  "Join words hyphenated over lines in TEXT and put it on one line.
+\"Liber-\" at the end of a line and \"ation\" on the next are read
+\"Liberation\".  Soft hyphens elsewhere are dropped."
   (thread-last
     text
-    (replace-regexp-in-string "\\([[:alpha:]]\\)-\n\\([[:alpha:]]\\)" "\\1\\2")
+    (replace-regexp-in-string kokoro--line-hyphen "\\1\\2")
+    (string-replace "\u00ad" "")
     (replace-regexp-in-string "[ \t\n\r\f]+" " ")
     (string-trim)))
 
@@ -469,7 +633,9 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
 
 (defun kokoro--source-key ()
   "The name the current buffer's file is remembered under, or nil."
-  (and buffer-file-name (abbreviate-file-name (expand-file-name buffer-file-name))))
+  ;; nov.el leaves its EPUB buffers without `buffer-file-name'.
+  (when-let* ((file (or buffer-file-name (bound-and-true-p nov-file-name))))
+    (abbreviate-file-name (expand-file-name file))))
 
 (defun kokoro--sources ()
   "The remembered settings, read from `kokoro-sources-file' the first time."
@@ -502,11 +668,15 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
                       ('kokoro-speed :speed)
                       ('kokoro--file-removals :remove)
                       ('kokoro-pdf-margins :margins))))
-    (let ((entry (assoc key (kokoro--sources))))
-      (if entry
-          (setcdr entry (plist-put (cdr entry) prop value))
-        (push (list key prop value) kokoro--sources)))
+    (kokoro--put-source key prop value)
     (kokoro--save-sources)))
+
+(defun kokoro--put-source (key prop value)
+  "Set PROP to VALUE in the settings remembered for KEY, without saving them."
+  (let ((entry (assoc key (kokoro--sources))))
+    (if entry
+        (setcdr entry (plist-put (cdr entry) prop value))
+      (push (list key prop value) kokoro--sources))))
 
 (defun kokoro--apply-source (buf)
   "Give BUF the voice and speed remembered for its file."
@@ -600,7 +770,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
   (kokoro--again))
 
 (defun kokoro-forget-source ()
-  "Forget the voice, speed and left-out text chosen for this file."
+  "Forget the voice, speed, left-out text and place remembered for this file."
   (interactive)
   (with-current-buffer (kokoro--settings-buffer)
     (let ((key (kokoro--source-key)))
@@ -653,6 +823,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
 (defun kokoro--clear ()
   "Forget what is being read and silence the server."
   (kokoro--send '(:cmd "stop"))
+  (kokoro--save-place)
   (dolist (e kokoro--pending)
     (set-marker (nth 1 e) nil)
     (set-marker (nth 2 e) nil))
@@ -709,13 +880,27 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
                                             (nth 0 span) (nth 1 span))))))
             t))))))
 
-(defun kokoro--finish ()
-  "End of the session: go on to the next page or chapter, or stop."
+(defun kokoro--finish (&optional skip)
+  "End of the session: go on to the next page or chapter, or stop.
+When SKIP is non-nil, go on even if `kokoro-continue' is nil."
   (let ((next (plist-get kokoro--session :next)))
     (kokoro--clear)
-    (unless (and next kokoro-continue (funcall next))
+    (unless (and next (or skip kokoro-continue) (funcall next))
       (kokoro--ui-end)
       (message "Kokoro: done"))))
+
+(defun kokoro--go-back (from)
+  "Read the page or chapter before, FROM its start (nil) or `last' sentence.
+Return nil, reading on as before, when there is none."
+  (when-let* ((prev (plist-get kokoro--session :prev)))
+    (kokoro--clear)
+    (funcall prev from)
+    t))
+
+(defun kokoro--at-first-sentence-p (entry)
+  "Non-nil if no sentence comes before ENTRY's in the text being read."
+  (with-current-buffer (marker-buffer (nth 1 entry))
+    (not (kokoro--next-sentence (point-min) (nth 1 entry)))))
 
 (defun kokoro--show (entry)
   "Highlight the sentence of ENTRY and keep it in view."
@@ -750,14 +935,141 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
       (user-error "Kokoro is not reading"))
     (let* ((buf (plist-get s :buffer))
            (end (marker-position (plist-get s :end)))
-           (props (list :next (plist-get s :next)
-                        :display (plist-get s :display)
-                        :page (plist-get s :page)
-                        :progress (plist-get s :progress)))
+           (props (cl-loop for (key value) on s by #'cddr
+                           unless (memq key '(:buffer :pos :end))
+                           append (list key value)))
            (start (with-current-buffer buf
                     (save-excursion (funcall move entry) (point)))))
       (with-current-buffer buf
         (kokoro--read start end props)))))
+
+;;;; Where reading got to
+
+(defvar kokoro--place-unsaved nil
+  "Time a place was noted that `kokoro-sources-file' does not have yet, or nil.")
+
+(defun kokoro--place-of (entry)
+  "Where the sentence of ENTRY is, as a plist `kokoro-resume' can go back to.
+It is (:page N :offset CHARS) in a PDF, (:chapter N :pos POS) in an EPUB
+and (:pos POS) elsewhere; nil for text that is not in the file, such as
+text selected on a PDF page."
+  (let ((display (plist-get kokoro--session :display))
+        (beg (nth 1 entry)))
+    (cond
+     ((plist-get kokoro--session :page)
+      (list :page (plist-get kokoro--session :page)
+            :offset (+ (or (plist-get kokoro--session :skip) 0)
+                       (with-current-buffer (marker-buffer beg)
+                         (- beg (point-min))))))
+     ((not (eq (marker-buffer beg) display)) nil)
+     (t
+      (with-current-buffer display
+        (append (and (derived-mode-p 'nov-mode) (list :chapter nov-documents-index))
+                (list :pos (marker-position beg)
+                      :percent (/ (* 100 (- beg (point-min)))
+                                  (max 1 (- (point-max) (point-min)))))))))))
+
+(defun kokoro--note-place (entry)
+  "Remember that the sentence of ENTRY is being read, for `kokoro-resume'.
+The sources file is written when reading stops, or once a minute."
+  (when-let* ((kokoro-remember-place)
+              (kokoro-sources-file)
+              (display (plist-get kokoro--session :display))
+              ((buffer-live-p display))
+              (key (with-current-buffer display (kokoro--source-key)))
+              (place (kokoro--place-of entry)))
+    (kokoro--put-source key :place (append place (list :time (float-time))))
+    (unless kokoro--place-unsaved
+      (setq kokoro--place-unsaved (float-time)))
+    (when (> (- (float-time) kokoro--place-unsaved) 60)
+      (kokoro--save-place))))
+
+(defun kokoro--save-place ()
+  "Write the places noted since the sources file was last written."
+  (when kokoro--place-unsaved
+    (setq kokoro--place-unsaved nil)
+    (kokoro--save-sources)))
+
+(add-hook 'kill-emacs-hook #'kokoro--save-place)
+
+(defun kokoro--describe-place (place)
+  "E.g. \"page 12\" or \"chapter 3, 40%\" for PLACE, and when it was read."
+  (concat (string-join
+           (delq nil (list (and (plist-get place :page) (format "page %d" (plist-get place :page)))
+                           (and (plist-get place :chapter)
+                                (format "chapter %d" (1+ (plist-get place :chapter))))
+                           (and (plist-get place :percent)
+                                (format "%d%%" (plist-get place :percent)))))
+           ", ")
+          (when-let* ((time (plist-get place :time)))
+            (format-time-string ", %Y-%m-%d %H:%M" time))))
+
+(defun kokoro--choose-place ()
+  "Ask for one of the files with a remembered place, the last read first."
+  (let* ((files (mapcar #'car
+                        (sort (cl-remove-if-not (lambda (e) (plist-get (cdr e) :place))
+                                                (copy-sequence (kokoro--sources)))
+                              (lambda (a b)
+                                (> (or (plist-get (plist-get (cdr a) :place) :time) 0)
+                                   (or (plist-get (plist-get (cdr b) :place) :time) 0))))))
+         (width (if files (apply #'max (mapcar (lambda (f) (length (file-name-nondirectory f)))
+                                               files))
+                  0))
+         (annotate (lambda (file)
+                     (concat (make-string (max 1 (- (+ width 2)
+                                                    (length (file-name-nondirectory file))))
+                                          ?\s)
+                             (propertize (kokoro--describe-place
+                                          (plist-get (cdr (assoc file (kokoro--sources))) :place))
+                                         'face 'completions-annotations)
+                             "  "
+                             (propertize (abbreviate-file-name (file-name-directory file))
+                                         'face 'shadow))))
+         (table (lambda (string pred action)
+                  (if (eq action 'metadata)
+                      `(metadata (category . kokoro-place)
+                                 (annotation-function . ,annotate)
+                                 (display-sort-function . identity)
+                                 (cycle-sort-function . identity))
+                    (complete-with-action action files string pred)))))
+    (unless files
+      (user-error "Kokoro: no file has a place to resume yet"))
+    (completing-read "Resume reading: " table nil t)))
+
+(defun kokoro--resume-at (place)
+  "Read the current buffer on from PLACE, made by `kokoro--place-of'."
+  (cond
+   ((plist-get place :page)
+    (unless (derived-mode-p 'pdf-view-mode)
+      (user-error "Kokoro: the place is a PDF page, but this is not a PDF"))
+    (let ((page (min (plist-get place :page) (pdf-info-number-of-pages))))
+      (pdf-view-goto-page page)
+      (kokoro--read-pdf-page (current-buffer) page (plist-get place :offset))))
+   (t
+    (when-let* ((chapter (plist-get place :chapter))
+                ((derived-mode-p 'nov-mode))
+                ((< chapter (length nov-documents)))
+                ((/= chapter nov-documents-index)))
+      (nov-goto-document chapter))
+    (goto-char (min (plist-get place :pos) (point-max)))
+    (kokoro--read (point) (point-max) (kokoro--book-props)))))
+
+;;;###autoload
+(defun kokoro-resume (&optional choose)
+  "Read on from where reading got to in this file.
+In a buffer without a remembered place, or with a prefix argument
+(CHOOSE), choose one of the files read before, the last one first, and
+open it there."
+  (interactive "P")
+  (let* ((key (kokoro--source-key))
+         (place (and key (not choose)
+                     (plist-get (cdr (assoc key (kokoro--sources))) :place))))
+    (unless place
+      (let ((file (kokoro--choose-place)))
+        (find-file file)
+        (setq place (plist-get (cdr (assoc file (kokoro--sources))) :place))))
+    (message "Kokoro: reading on from %s" (kokoro--describe-place place))
+    (kokoro--resume-at place)))
 
 ;;;; Books
 
@@ -766,6 +1078,8 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
   (when (derived-mode-p 'nov-mode)
     (let ((buf (current-buffer)))
       (list :next (lambda () (kokoro--nov-next buf))
+            :prev (and (> nov-documents-index 0)
+                       (lambda (from) (kokoro--nov-previous buf from)))
             :progress (lambda ()
                         (with-current-buffer buf
                           (format "chapter %d/%d" (1+ nov-documents-index)
@@ -781,6 +1095,18 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
     (with-current-buffer buf
       (kokoro--read (point-min) (point-max) (kokoro--book-props)))
     t))
+
+(defun kokoro--nov-previous (buf from)
+  "Read the chapter before the one in BUF, FROM its start or `last' sentence."
+  (when (buffer-live-p buf)
+    (if-let* ((win (get-buffer-window buf t)))
+        (with-selected-window win (nov-previous-document))
+      (with-current-buffer buf (nov-previous-document)))
+    (with-current-buffer buf
+      (kokoro--read (if (eq from 'last)
+                        (kokoro--last-sentence-start (point-min) (point-max))
+                      (point-min))
+                    (point-max) (kokoro--book-props)))))
 
 ;;;; PDF
 
@@ -815,9 +1141,10 @@ property `kokoro-pdf', as (PAGE LEFT TOP RIGHT BOTTOM)."
     (or (bobp)
         (looking-back "[.!?:;][\"'”’)]*" (max (point-min) (- (point) 4))))))
 
-(defun kokoro--read-pdf-page (pdf page &optional skip)
+(defun kokoro--read-pdf-page (pdf page &optional skip from)
   "Read PAGE of the PDF buffer PDF, then the pages after it.
 SKIP characters at the start of the page were read with the page before.
+When FROM is `last', start at the page's last sentence.
 A sentence running onto the next page is finished before turning it."
   (kokoro--apply-source pdf)            ; its own margins, before reading the page
   (let ((pages (with-current-buffer pdf (pdf-info-number-of-pages)))
@@ -831,7 +1158,7 @@ A sentence running onto the next page is finished before turning it."
         (goto-char (point-max))
         (skip-chars-backward " \t\n")
         (delete-region (point) (point-max))
-        (if (looking-back "[[:alpha:]]-" (max (point-min) (- (point) 2)))
+        (if (looking-back "[[:alpha:]][-\u00ad\u2010\u2011¬]" (max (point-min) (- (point) 2)))
             (delete-char -1)               ; word hyphenated over the pages
           (insert " "))
         (let ((joined (point)))
@@ -843,10 +1170,16 @@ A sentence running onto the next page is finished before turning it."
             (setq carry (- (point) joined))
             (delete-region (point) (point-max)))))
       (message "Kokoro: page %d" page)
-      (kokoro--read (point-min) (point-max)
+      (kokoro--read (if (eq from 'last)
+                        (kokoro--last-sentence-start (point-min) (point-max))
+                      (point-min))
+                    (point-max)
                     (list :display pdf
                           :page page
+                          :skip (or skip 0)
                           :next (lambda () (kokoro--pdf-next pdf page carry))
+                          :prev (and (> page 1)
+                                     (lambda (from) (kokoro--pdf-previous pdf page from)))
                           :progress (lambda () (format "page %d/%d" page pages)))))))
 
 (defun kokoro--pdf-next (pdf page carry)
@@ -856,6 +1189,13 @@ A sentence running onto the next page is finished before turning it."
       (with-selected-window win (pdf-view-goto-page (1+ page) win)))
     (kokoro--read-pdf-page pdf (1+ page) carry)
     t))
+
+(defun kokoro--pdf-previous (pdf page from)
+  "Read the page before PAGE of PDF, FROM its start or `last' sentence."
+  (when (buffer-live-p pdf)
+    (when-let* ((win (get-buffer-window pdf t)))
+      (with-selected-window win (pdf-view-goto-page (1- page) win)))
+    (kokoro--read-pdf-page pdf (1- page) nil from)))
 
 (defun kokoro--pdf-boxes (beg end)
   "Boxes covering the text from BEG to END on its PDF pages.
@@ -877,6 +1217,43 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
         (push (cdr box) (alist-get (car box) pages)))
       (mapcar (lambda (p) (cons (car p) (nreverse (cdr p)))) pages))))
 
+(defun kokoro--pdf-marks (boxes)
+  "The rectangles to draw for BOXES, by `kokoro-pdf-highlight-style'."
+  (if (eq kokoro-pdf-highlight-style 'underline)
+      (mapcar (pcase-lambda (`(,left ,top ,right ,bottom))
+                ;; A thin bar just under the line, a tenth of its height.
+                (let ((thick (max 0.002 (* 0.1 (- bottom top)))))
+                  (list left bottom right (+ bottom thick))))
+              boxes)
+    boxes))
+
+(defun kokoro--pdf-blend (color opacity)
+  "COLOR as it looks at OPACITY over the page, white (or black at night)."
+  (let ((paper (if (bound-and-true-p pdf-view-midnight-minor-mode) 0.0 1.0)))
+    (apply #'format "#%02x%02x%02x"
+           (mapcar (lambda (c) (round (* 255 (+ (* c opacity) (* paper (- 1 opacity))))))
+                   (if (string-match "\\`#\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\([[:xdigit:]]\\{2\\}\\)\\'" color)
+                       (mapcar (lambda (i) (/ (string-to-number (match-string i color) 16) 255.0))
+                               '(1 2 3))
+                     (color-name-to-rgb color))))))
+
+(defun kokoro--pdf-show-boxes (page boxes)
+  "Show PAGE in the selected window with BOXES highlighted."
+  (let* ((width (car (pdf-view-image-size)))
+         (opacity (min 1.0 (if (eq kokoro-pdf-highlight-style 'underline)
+                               (* 2 kokoro-pdf-highlight-opacity)
+                             kokoro-pdf-highlight-opacity)))
+         ;; pdf-tools outlines each box in a solid color: the one the
+         ;; see-through fill has, so there is no hard edge.
+         (edge (kokoro--pdf-blend kokoro-pdf-highlight-color opacity)))
+    (pdf-view-display-image
+     (pdf-view-create-image
+         (pdf-info-renderpage-highlight
+          page width nil
+          `(,kokoro-pdf-highlight-color ,edge ,opacity ,@(kokoro--pdf-marks boxes)))
+       :width width)
+     (and (bound-and-true-p pdf-view-roll-minor-mode) page))))
+
 (defun kokoro--pdf-highlight (pdf beg end)
   "Highlight the text from BEG to END on the pages of PDF on screen."
   (let ((boxes (with-current-buffer (marker-buffer beg) (kokoro--pdf-boxes beg end))))
@@ -886,7 +1263,7 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
             (let* ((page (image-mode-window-get 'page win))
                    (here (alist-get page boxes)))
               (if here
-                  (pdf-view-display-region (cons page here) t)
+                  (kokoro--pdf-show-boxes page here)
                 (pdf-view-redisplay win)))
           (error (message "Kokoro: cannot highlight the page: %s"
                           (error-message-string err))))))))
@@ -1085,12 +1462,62 @@ In a PDF, read the selected text, or the pages from the current one on."
   (kokoro--restart (lambda (e) (goto-char (nth 2 e)))))
 
 (defun kokoro-previous ()
-  "Go back to the sentence before the one being read."
+  "Go back to the sentence before the one being read.
+At the start of a PDF page or EPUB chapter, go back to the last
+sentence of the one before."
   (interactive)
-  (kokoro--restart (lambda (e)
-                     (goto-char (nth 1 e))
-                     (let ((sentence-end-double-space nil))
-                       (backward-sentence)))))
+  (unless (and kokoro--current
+               (kokoro--at-first-sentence-p kokoro--current)
+               (kokoro--go-back 'last))
+    (kokoro--restart (lambda (e)
+                       (goto-char (nth 1 e))
+                       (let ((sentence-end-double-space nil))
+                         (backward-sentence))))))
+
+(defun kokoro-repeat ()
+  "Read the sentence being read again."
+  (interactive)
+  (unless kokoro--current
+    (user-error "Kokoro is not reading"))
+  (kokoro--again))
+
+(defun kokoro-next-paragraph ()
+  "Skip to the next paragraph.  In a PDF, skip to the next page."
+  (interactive)
+  (let ((entry kokoro--current)
+        (s kokoro--session))
+    (unless (and entry s)
+      (user-error "Kokoro is not reading"))
+    (if (plist-get s :page)
+        (kokoro--finish t)
+      (let ((start (with-current-buffer (marker-buffer (nth 2 entry))
+                     (save-excursion
+                       (goto-char (nth 2 entry))
+                       (forward-paragraph)
+                       (point)))))
+        (if (kokoro--next-sentence start (plist-get s :end))
+            (kokoro--restart (lambda (_) (goto-char start)))
+          (kokoro--finish t))))))
+
+(defun kokoro-previous-paragraph ()
+  "Go back to the start of the paragraph, or of the one before at its start.
+In a PDF, go back to the start of the page, or of the page before."
+  (interactive)
+  (let ((entry kokoro--current)
+        (s kokoro--session))
+    (unless (and entry s)
+      (user-error "Kokoro is not reading"))
+    (cond
+     ((and (kokoro--at-first-sentence-p entry) (kokoro--go-back nil)))
+     ((plist-get s :page)
+      (kokoro--restart (lambda (_) (goto-char (point-min)))))
+     (t
+      (kokoro--restart
+       (lambda (e)
+         (goto-char (nth 1 e))
+         (backward-paragraph)
+         (unless (kokoro--next-sentence (point) (nth 1 e)) ; it was at the start
+           (backward-paragraph))))))))
 
 (defun kokoro--again ()
   "Read the current sentence again, e.g. with a new voice or speed."
@@ -1127,49 +1554,201 @@ With a prefix argument (LOCAL), only in the buffer being read (or this one)."
   (interactive)
   (kokoro-faster -0.1))
 
+;;;; Saving audio
+
+(defcustom kokoro-audio-format (if (executable-find "ffmpeg") "mp3" "wav")
+  "Kind of audio file \\[kokoro-save-audio] makes, by its extension.
+\"wav\", or \"mp3\", \"opus\", \"m4a\" or \"flac\", which need ffmpeg.
+Opus files are the smallest; MP3 plays everywhere."
+  :type '(choice (const "mp3") (const "opus") (const "m4a") (const "flac") (const "wav")
+                 string))
+
+(defvar kokoro--narrations nil
+  "Narrations running in the background: lists (PROCESS NAME DONE TOTAL).")
+
+(defun kokoro--narrations-mode-line ()
+  "E.g. \" Narrating book.mp3 41%\" while audio is being saved."
+  (mapconcat (lambda (n)
+               (format " Narrating %s %d%%" (nth 1 n)
+                       (/ (* 100 (nth 2 n)) (max 1 (nth 3 n)))))
+             kokoro--narrations ""))
+
+(defconst kokoro--narrations-entry '(:eval (kokoro--narrations-mode-line)))
+
+(defun kokoro--export-sentences (beg end)
+  "The current buffer's text from BEG to END as it is read aloud.
+One sentence a line, as spoken, and an empty line after each paragraph."
+  (let ((pos beg) span lines)
+    (while (setq span (kokoro--next-sentence pos end))
+      (when (and lines
+                 (string-match-p "\n[ \t\r\f]*\n"
+                                 (buffer-substring-no-properties pos (nth 0 span))))
+        (push "" lines))
+      (let ((text (or (nth 2 span)
+                      (kokoro--text (buffer-substring-no-properties (nth 0 span) (nth 1 span))))))
+        (unless (string-empty-p text)
+          (push text lines)))
+      (setq pos (nth 1 span)))
+    (mapconcat #'identity (nreverse lines) "\n")))
+
+(defun kokoro--export-text (buf &optional beg end)
+  "BUF's text (or from BEG to END) as `kokoro--export-sentences' gives it.
+In a PDF, every page without its margins; in an EPUB, every chapter."
+  (kokoro--apply-source buf)
+  (let ((kokoro--session (list :display buf))) ; its own left-out text
+    (with-current-buffer buf
+      (cond
+       ((derived-mode-p 'pdf-view-mode)
+        (with-temp-buffer
+          (dotimes (i (with-current-buffer buf (pdf-info-number-of-pages)))
+            (kokoro--pdf-insert-page buf (1+ i))
+            (insert "\n"))
+          (kokoro--export-sentences (point-min) (point-max))))
+       ((and (derived-mode-p 'nov-mode) (not beg))
+        (let ((index nov-documents-index)
+              (here (point))
+              chapters)
+          (unwind-protect
+              (dotimes (i (length nov-documents))
+                (message "Kokoro: preparing chapter %d/%d..." (1+ i) (length nov-documents))
+                (nov-goto-document i)
+                (push (kokoro--export-sentences (point-min) (point-max)) chapters))
+            (nov-goto-document index)
+            (goto-char here))
+          (mapconcat #'identity (nreverse (delete "" chapters)) "\n\n")))
+       (t (kokoro--export-sentences (or beg (point-min)) (or end (point-max))))))))
+
+(defun kokoro--audio-name (name)
+  "NAME with the extension of `kokoro-audio-format'."
+  (concat (file-name-sans-extension name) "." kokoro-audio-format))
+
+(defun kokoro--narrate (args output voice speed &optional delete)
+  "Run the narrate script with ARGS into OUTPUT, with VOICE and SPEED.
+DELETE is a file to delete once it is done."
+  (let* ((process-environment (cons "PYTHONIOENCODING=utf-8" process-environment))
+         (name (file-name-nondirectory output))
+         (buffer (get-buffer-create "*kokoro-narrate*"))
+         (proc
+          (make-process
+           :name "kokoro-narrate"
+           :buffer buffer
+           :command (append (list kokoro-python kokoro-narrate-script) args
+                            (list "-o" output "-v" voice "-s" (number-to-string speed)))
+           :noquery t
+           :filter (lambda (proc string)
+                     (when (buffer-live-p (process-buffer proc))
+                       (with-current-buffer (process-buffer proc)
+                         (goto-char (point-max))
+                         (insert string)))
+                     (when-let* ((entry (assq proc kokoro--narrations))
+                                 ((string-match "\\(?:.*\n\\)*\\[\\([0-9]+\\)/\\([0-9]+\\)\\]"
+                                                string)))
+                       (setf (nth 2 entry) (string-to-number (match-string 1 string))
+                             (nth 3 entry) (string-to-number (match-string 2 string)))
+                       (force-mode-line-update t)))
+           :sentinel (lambda (proc _event)
+                       (unless (process-live-p proc)
+                         (setq kokoro--narrations (assq-delete-all proc kokoro--narrations))
+                         (force-mode-line-update t)
+                         (when delete
+                           (ignore-errors (delete-file delete)))
+                         (if (zerop (process-exit-status proc))
+                             (message "Kokoro: saved %s" output)
+                           (message "Kokoro: saving %s failed; see *kokoro-narrate*"
+                                    name)))))))
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (insert (format "\n--- %s, %s ---\n" output (format-time-string "%F %T"))))
+    (push (list proc name 0 1) kokoro--narrations)
+    (unless (member kokoro--narrations-entry global-mode-string)
+      (setq global-mode-string (append (or global-mode-string '("")) (list kokoro--narrations-entry))))
+    (message "Kokoro: saving %s in the background (progress in the mode line)..." name)
+    proc))
+
+(defun kokoro--narrate-text (text output voice speed)
+  "Narrate TEXT, prepared by `kokoro--export-text', into OUTPUT."
+  (when (string-blank-p text)
+    (user-error "Kokoro: there is nothing to read here"))
+  (let ((lines (make-temp-file "kokoro-" nil ".txt")))
+    (let ((coding-system-for-write 'utf-8-unix))
+      (write-region text nil lines nil 'silent))
+    (kokoro--narrate (list "--lines" lines) output voice speed lines)))
+
+(defun kokoro--file-buffer (file)
+  "A buffer showing FILE the way Emacs reads it, and whether it was made for this.
+Return (BUFFER . NEW)."
+  (let ((key (abbreviate-file-name (expand-file-name file))))
+    (or (cl-loop for buf in (buffer-list)
+                 when (equal (with-current-buffer buf (kokoro--source-key)) key)
+                 return (cons buf nil))
+        (cons (find-file-noselect file) t))))
+
 ;;;###autoload
-(defun kokoro-save-audio (file output &optional delete-input)
-  "Narrate FILE (txt, md, pdf or docx) into the WAV file OUTPUT, in the background.
-When DELETE-INPUT is non-nil, delete FILE once done."
+(defun kokoro-save-audio (file output)
+  "Narrate FILE into the audio file OUTPUT, in the background.
+The text is cleaned the way it is read aloud: `kokoro-pronunciations',
+left-out text, PDF margins, skipped code blocks and so on, and read with
+the voice and speed of the file.  FILE can be any text file, an EPUB
+(with nov.el) or a PDF (with pdf-tools); Word files are read by the
+script.  The kind of audio file is OUTPUT's extension; see
+`kokoro-audio-format'."
   (interactive
    (let* ((file (read-file-name "Narrate file: " nil nil t
-                                (and buffer-file-name (file-name-nondirectory buffer-file-name))))
+                                (when-let* ((key (kokoro--source-key)))
+                                  (file-name-nondirectory key))))
           (output (read-file-name "Save audio as: " (file-name-directory file) nil nil
-                                  (concat (file-name-base file) ".wav"))))
+                                  (kokoro--audio-name (file-name-nondirectory file)))))
      (list (expand-file-name file) (expand-file-name output))))
-  (let* ((process-environment (cons "PYTHONIOENCODING=utf-8" process-environment))
-         (remembered (cdr (assoc (abbreviate-file-name (expand-file-name file))
-                                 (and kokoro-sources-file (kokoro--sources)))))
-         (voice (or (plist-get remembered :voice) (kokoro--voice)))
-         (speed (or (plist-get remembered :speed) (kokoro--speed))))
-    (make-process
-     :name "kokoro-narrate"
-     :buffer (get-buffer-create "*kokoro-narrate*")
-     :command (list kokoro-python kokoro-narrate-script file "-o" output
-                    "-v" voice "-s" (number-to-string speed))
-     :noquery t
-     :sentinel (lambda (proc _event)
-                 (unless (process-live-p proc)
-                   (when delete-input
-                     (ignore-errors (delete-file file)))
-                   (if (zerop (process-exit-status proc))
-                       (message "Kokoro: saved %s" output)
-                     (message "Kokoro: narration failed; see *kokoro-narrate*"))))))
-  (message "Kokoro: narrating %s in the background..."
-           (if delete-input "the region" (file-name-nondirectory file))))
+  (let* ((ext (downcase (or (file-name-extension file) "")))
+         (opened (unless (equal ext "docx") (kokoro--file-buffer file)))
+         (buf (car opened)))
+    (unwind-protect
+        (cond
+         ((or (null buf)
+              (and (equal ext "pdf")
+                   (not (with-current-buffer buf (derived-mode-p 'pdf-view-mode)))))
+          ;; Word, or a PDF without pdf-tools: the script reads it.
+          (let ((remembered (cdr (assoc (abbreviate-file-name (expand-file-name file))
+                                        (and kokoro-sources-file (kokoro--sources))))))
+            (kokoro--narrate (list file) output
+                             (or (plist-get remembered :voice) kokoro-voice)
+                             (float (or (plist-get remembered :speed) kokoro-speed)))))
+         ((and (equal ext "epub") (not (with-current-buffer buf (derived-mode-p 'nov-mode))))
+          (user-error "Kokoro: saving an EPUB needs nov.el"))
+         (t
+          (let ((text (kokoro--export-text buf)))
+            (kokoro--narrate-text text output
+                                  (buffer-local-value 'kokoro-voice buf)
+                                  (float (buffer-local-value 'kokoro-speed buf))))))
+      (when (cdr opened)
+        (kill-buffer buf)))))
 
 ;;;###autoload
 (defun kokoro-save-region-audio (beg end output)
-  "Narrate the text between BEG and END into the WAV file OUTPUT."
+  "Narrate the text between BEG and END into the audio file OUTPUT.
+In a PDF, narrate the selected text."
   (interactive
-   (list (region-beginning) (region-end)
-         (expand-file-name (read-file-name "Save audio as: " nil nil nil
-                                           (concat (file-name-base (or buffer-file-name (buffer-name)))
-                                                   ".wav")))))
-  (let ((text-file (make-temp-file "kokoro-" nil ".txt")))
-    (let ((coding-system-for-write 'utf-8))
-      (write-region beg end text-file))
-    (kokoro-save-audio text-file output t)))
+   (progn
+     (unless (or (use-region-p)
+                 (and (derived-mode-p 'pdf-view-mode) (pdf-view-active-region-p)))
+       (user-error "Kokoro: select the text to save first"))
+     (list (and (use-region-p) (region-beginning)) (and (use-region-p) (region-end))
+           (expand-file-name
+            (read-file-name "Save audio as: " nil nil nil
+                            (kokoro--audio-name
+                             (file-name-nondirectory
+                              (or (kokoro--source-key) (buffer-name)))))))))
+  (kokoro--apply-source (current-buffer))
+  (let* ((buf (current-buffer))
+         (text (if beg
+                   (kokoro--export-text buf beg end)
+                 (with-temp-buffer
+                   (insert (string-join (with-current-buffer buf (pdf-view-active-region-text))
+                                        "\n"))
+                   (let ((kokoro--session (list :display buf)))
+                     (kokoro--export-sentences (point-min) (point-max)))))))
+    (kokoro--narrate-text text output (buffer-local-value 'kokoro-voice buf)
+                          (float (buffer-local-value 'kokoro-speed buf)))))
 
 (defun kokoro-quit ()
   "Shut the speech server down."
@@ -1188,10 +1767,14 @@ When DELETE-INPUT is non-nil, delete FILE once done."
   "r" #'kokoro-read-region
   "a" #'kokoro-read-buffer
   "." #'kokoro-read-paragraph
+  "c" #'kokoro-resume
   "SPC" #'kokoro-pause
   "s" #'kokoro-stop
   "n" #'kokoro-next
   "p" #'kokoro-previous
+  "," #'kokoro-repeat
+  "]" #'kokoro-next-paragraph
+  "[" #'kokoro-previous-paragraph
   "v" #'kokoro-select-voice
   "S" #'kokoro-set-speed
   "+" #'kokoro-faster

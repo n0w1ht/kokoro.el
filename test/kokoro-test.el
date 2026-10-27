@@ -92,6 +92,20 @@
                  "A bold and code hyphenated line."))
   (should (equal (kokoro--text "Go to https://example.com/x now") "Go to link now")))
 
+(ert-deftest kokoro-test-symbols ()
+  (should (equal (kokoro--text "WBC 11×10⁹/L, platelets 150–400 ×10^9/L.")
+                 "WBC 11 times 10 to the 9 per liter, platelets 150 to 400 times 10 to the 9 per liter."))
+  (should (equal (kokoro--text "HR 72 beats/min; 38.5 °C; BP > 140/90, K+ <3.5.")
+                 "HR 72 beats per minute; 38.5 degrees Celsius; BP greater than 140/90, K+ less than 3.5."))
+  ;; References in superscript are left out; Greek letters and subscripts said.
+  (should (equal (kokoro--text "β-blockers cut mortality¹²,¹³ and α₁ tone.²")
+                 "beta-blockers cut mortality and alpha 1 tone."))
+  (should (equal (kokoro--text "2 m² and 5 μg, ↑ TSH → ↓ T4, pH = 7.4 ± 0.1, HbA1c ≥ 6.5%.")
+                 "2 square meters and 5 micrograms, increased TSH leads to decreased T4, pH equals 7.4 plus or minus 0.1, HbA1c greater than or equal to 6.5%."))
+  ;; Dates are not ranges; a quote mark is not a comparison.
+  (should (equal (kokoro--text "On 2026-10-27, read 5-10.") "On 2026-10-27, read 5 to 10."))
+  (should (equal (kokoro--text "> Quoted line") "Quoted line")))
+
 (ert-deftest kokoro-test-pronunciations ()
   (should (equal (kokoro--text "Give 5 mg p.o. b.i.d., e.g. with food.")
                  "Give 5 milligrams by mouth twice a day, for example with food."))
@@ -307,6 +321,278 @@
         (kokoro-stop))
       (should-not (file-exists-p sources-file)))))
 
+;;;; Resuming
+
+(ert-deftest kokoro-test-resume-text-file ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (with-current-buffer (find-file-noselect book)
+        (kokoro-read-buffer)
+        (kokoro-test--play (car (car kokoro--pending)))
+        (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+        (kokoro-test--play (car (car kokoro--pending))) ; "Two."
+        (kokoro-stop)
+        (kill-buffer))
+      ;; Written when reading stopped, and found after a restart.
+      (setq kokoro--sources 'unread)
+      (with-current-buffer (find-file-noselect book)
+        (setq sent nil)
+        (kokoro-resume)
+        (should (equal (kokoro-test--spoken sent) '("Two." "Three.")))
+        (kokoro-stop)
+        (kill-buffer))
+      ;; Elsewhere it asks which file, and opens it there.
+      (with-temp-buffer
+        (setq sent nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table &rest _)
+                     (car (all-completions "" table)))))
+          (kokoro-resume))
+        (should (equal (buffer-file-name) (expand-file-name book)))
+        (should (equal (car (kokoro-test--spoken sent)) "Two."))
+        (kokoro-stop)
+        (kill-buffer (find-buffer-visiting book))))))
+
+(ert-deftest kokoro-test-resume-not-remembered ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      ;; Plain buffers, and kokoro-remember-place nil, keep no place.
+      (with-temp-buffer
+        (insert "One. Two.")
+        (kokoro-read-buffer)
+        (kokoro-test--play (car (car kokoro--pending)))
+        (kokoro-stop))
+      (let ((kokoro-remember-place nil))
+        (with-current-buffer (find-file-noselect book)
+          (kokoro-read-buffer)
+          (kokoro-test--play (car (car kokoro--pending)))
+          (kokoro-stop)
+          (kill-buffer)))
+      (should-not (kokoro--sources))
+      (should-error (kokoro-resume) :type 'user-error))))
+
+(ert-deftest kokoro-test-resume-epub-uses-nov-file-name ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (let ((chapters ["Chapter one. Ends here." "Chapter two. Middle part. Last part."])
+            (gone-to nil))
+        (with-temp-buffer
+          ;; Imitate nov: no buffer-file-name, the EPUB in nov-file-name.
+          (setq-local nov-file-name book)
+          (setq-local nov-documents (vector 'a 'b))
+          (setq-local nov-documents-index 1)
+          (insert (aref chapters 1))
+          (cl-letf (((symbol-function 'derived-mode-p)
+                     (lambda (&rest modes) (memq 'nov-mode modes)))
+                    ((symbol-function 'nov-goto-document)
+                     (lambda (i)
+                       (setq gone-to i nov-documents-index i)
+                       (erase-buffer)
+                       (insert (aref chapters i)))))
+            (kokoro-read-buffer)
+            (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+            (kokoro-test--play (car (car kokoro--pending))) ; "Middle part."
+            (kokoro-stop)
+            (should (equal (plist-get (plist-get (cdr (assoc (abbreviate-file-name book)
+                                                              (kokoro--sources)))
+                                                  :place)
+                                      :chapter)
+                           1))
+            ;; Reopened at another chapter: it goes back to chapter two.
+            (nov-goto-document 0)
+            (setq sent nil)
+            (kokoro-resume)
+            (should (= gone-to 1))
+            (should (equal (car (kokoro-test--spoken sent)) "Middle part."))
+            (kokoro-stop)))))))
+
+(ert-deftest kokoro-test-resume-pdf-page ()
+  (kokoro-test--with-fake-server
+    (kokoro-test--with-sources
+      (let ((pages '((1 . "Page one.") (2 . "Start of two. Then more. End.")))
+            (shown nil))
+        (cl-letf (((symbol-function 'pdf-info-number-of-pages) (lambda () 2))
+                  ((symbol-function 'pdf-view-goto-page) (lambda (p &rest _) (setq shown p)))
+                  ((symbol-function 'pdf-info-charlayout)
+                   (lambda (page)
+                     (mapcar (lambda (c) (list c '(0.1 0.5 0.2 0.52))) (alist-get page pages)))))
+          (with-current-buffer (find-file-noselect book)
+            (cl-letf (((symbol-function 'derived-mode-p)
+                       (lambda (&rest modes) (memq 'pdf-view-mode modes))))
+              (kokoro--read-pdf-page (current-buffer) 2)
+              (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+              (kokoro-test--play (car (car kokoro--pending))) ; "Then more."
+              (kokoro-stop)
+              (setq kokoro--sources 'unread)
+              (setq sent nil)
+              (kokoro-resume)
+              (should (= shown 2))
+              (should (equal (kokoro-test--spoken sent) '("Then more." "End.")))
+              ;; Going on from the resumed place notes the right offset.
+              (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+              (kokoro-test--play (car (car kokoro--pending))) ; "End."
+              (kokoro-stop)
+              (setq sent nil)
+              (kokoro-resume)
+              (should (equal (kokoro-test--spoken sent) '("End.")))
+              (kokoro-stop))
+            (kill-buffer)))))))
+
+;;;; Moving about
+
+(ert-deftest kokoro-test-repeat-and-paragraphs ()
+  (kokoro-test--with-fake-server
+    (with-temp-buffer
+      (insert "One a. One b.\n\nTwo a. Two b.\n\nThree a.")
+      (kokoro-read-buffer)
+      (kokoro-test--play (car (car kokoro--pending)))           ; One a.
+      (setq sent nil)
+      (kokoro-repeat)
+      (should (equal (car (kokoro-test--spoken sent)) "One a."))
+      (kokoro-test--play (car (car kokoro--pending)))
+      (setq sent nil)
+      (kokoro-next-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "Two a."))
+      (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+      (kokoro-test--play (car (car kokoro--pending)))           ; Two b.
+      ;; Back to the start of this paragraph, then to the one before.
+      (setq sent nil)
+      (kokoro-previous-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "Two a."))
+      (kokoro-test--play (car (car kokoro--pending)))
+      (setq sent nil)
+      (kokoro-previous-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "One a."))
+      ;; From the last paragraph, skipping on ends the reading.
+      (kokoro-stop)
+      (goto-char (point-max))
+      (kokoro-read-paragraph)
+      (kokoro-test--play (car (car kokoro--pending)))
+      (kokoro-next-paragraph)
+      (should-not kokoro--session))
+    (should-error (kokoro-repeat) :type 'user-error)))
+
+(ert-deftest kokoro-test-pdf-back-and-forth-across-pages ()
+  (kokoro-test--with-fake-server
+    (let ((pages '((1 . "First page. Its end.") (2 . "Second page. More here.")))
+          (pdf (generate-new-buffer "pdf")))
+      (cl-letf (((symbol-function 'pdf-info-number-of-pages) (lambda () 2))
+                ((symbol-function 'pdf-info-charlayout)
+                 (lambda (page)
+                   (mapcar (lambda (c) (list c '(0.1 0.5 0.2 0.52))) (alist-get page pages)))))
+        (unwind-protect
+            (progn
+              (kokoro--read-pdf-page pdf 2)
+              (kokoro-test--play (car (car kokoro--pending)))   ; Second page.
+              ;; Previous at the top of a page: last sentence of the one before.
+              (setq sent nil)
+              (kokoro-previous)
+              (should (= (plist-get kokoro--session :page) 1))
+              (should (equal (kokoro-test--spoken sent) '("Its end.")))
+              (kokoro-test--play (car (car kokoro--pending)))
+              ;; ] turns the page; [ at its top goes to the start of the one before.
+              (setq sent nil)
+              (kokoro-next-paragraph)
+              (should (= (plist-get kokoro--session :page) 2))
+              (kokoro-test--play (car (car kokoro--pending)))
+              (setq sent nil)
+              (kokoro-previous-paragraph)
+              (should (= (plist-get kokoro--session :page) 1))
+              (should (equal (car (kokoro-test--spoken sent)) "First page."))
+              ;; On page 1 there is nothing before: previous stays on it.
+              (kokoro-test--play (car (car kokoro--pending)))
+              (kokoro-previous)
+              (should (= (plist-get kokoro--session :page) 1)))
+          (kokoro-stop)
+          (kill-buffer pdf))))))
+
+(ert-deftest kokoro-test-epub-previous-chapter ()
+  (kokoro-test--with-fake-server
+    (let ((chapters ["One first. One last." "Two first. Two last."]))
+      (with-temp-buffer
+        (setq-local nov-documents (vector 'a 'b))
+        (setq-local nov-documents-index 1)
+        (insert (aref chapters 1))
+        (cl-letf (((symbol-function 'derived-mode-p)
+                   (lambda (&rest modes) (memq 'nov-mode modes)))
+                  ((symbol-function 'nov-previous-document)
+                   (lambda ()
+                     (setq nov-documents-index (1- nov-documents-index))
+                     (erase-buffer)
+                     (insert (aref chapters nov-documents-index)))))
+          (kokoro-read-buffer)
+          (kokoro-test--play (car (car kokoro--pending)))
+          (setq sent nil)
+          (kokoro-previous)
+          (should (= nov-documents-index 0))
+          (should (equal (kokoro-test--spoken sent) '("One last.")))
+          ;; Chapter one has none before it.
+          (should-not (plist-get kokoro--session :prev))
+          (kokoro-stop))))))
+
+;;;; Saving audio
+
+(defmacro kokoro-test--capturing-narration (&rest body)
+  "Run BODY with the narrate script replaced; `narrated' holds (ARGS TEXT VOICE SPEED)."
+  (declare (indent 0))
+  `(let (narrated)
+     (cl-letf (((symbol-function 'kokoro--narrate)
+                (lambda (args _output voice speed &optional _delete)
+                  (push (list args
+                              (and (equal (car args) "--lines")
+                                   (with-temp-buffer
+                                     (insert-file-contents (cadr args))
+                                     (buffer-string)))
+                              voice speed)
+                        narrated)
+                  (when (equal (car args) "--lines")
+                    (delete-file (cadr args))))))
+       ,@body)))
+
+(ert-deftest kokoro-test-export-is-cleaned-like-reading ()
+  (kokoro-test--capturing-narration
+    (kokoro-test--with-sources
+      (let ((org (make-temp-file "kokoro-notes-" nil ".org"
+                                 (concat "Give 5 mg daily. Ref {1.2} here.\n\n"
+                                         "#+begin_src elisp\n(x)\n#+end_src\n"
+                                         "After ≥ 2 doses.\n"))))
+        (unwind-protect
+            (progn
+              (with-current-buffer (find-file-noselect org)
+                (kokoro-skip-text "{[0-9.]+}")
+                (kokoro-select-voice "bm_george" t)
+                (kill-buffer))
+              (kokoro-save-audio org "/tmp/out.mp3")
+              (pcase-let ((`(,args ,text ,voice ,speed) (car narrated)))
+                (should (equal (car args) "--lines"))
+                (should (equal text (concat "Give 5 milligrams daily.\nRef here.\n\n"
+                                            "Code block.\nAfter greater than or equal to 2 doses.")))
+                (should (equal voice "bm_george"))
+                (should (= speed 1.0)))
+              ;; The file it opened is closed again.
+              (should-not (find-buffer-visiting org)))
+          (delete-file org))))))
+
+(ert-deftest kokoro-test-export-region-and-word ()
+  (kokoro-test--capturing-narration
+    (with-temp-buffer
+      (insert "Skip this. Read this one. And this.")
+      (goto-char (point-min))
+      (search-forward "Read")
+      (kokoro-save-region-audio (match-beginning 0) (point-max) "/tmp/r.wav")
+      (should (equal (nth 1 (car narrated)) "Read this one.\nAnd this.")))
+    ;; Word files go to the script as they are.
+    (kokoro-save-audio "/tmp/report.docx" "/tmp/report.mp3")
+    (should (equal (car (car narrated)) '("/tmp/report.docx")))))
+
+(ert-deftest kokoro-test-narration-progress ()
+  (let ((kokoro--narrations (list (list 'proc "book.mp3" 41 100))))
+    (should (equal (kokoro--narrations-mode-line) " Narrating book.mp3 41%")))
+  (should (equal (kokoro--audio-name "notes.org")
+                 (concat "notes." kokoro-audio-format))))
+
+;;;; Voice description
+
 (ert-deftest kokoro-test-voice-description ()
   (should (equal (kokoro--voice-description "af_heart") "American English, female"))
   (should (equal (kokoro--voice-description "bm_george") "British English, male"))
@@ -363,6 +649,28 @@
                   (mapcar (lambda (box) (mapcar (lambda (x) (/ (fround (* x 100)) 100)) box))
                           (cdr page))))
           boxes))
+
+(ert-deftest kokoro-test-pdf-highlight-is-see-through ()
+  (let ((kokoro-pdf-highlight-color "#ffd84d")
+        (kokoro-pdf-highlight-opacity 0.25)
+        drawn)
+    (cl-letf (((symbol-function 'pdf-view-image-size) (lambda (&rest _) '(800 . 1000)))
+              ((symbol-function 'pdf-view-create-image) (lambda (data &rest _) data))
+              ((symbol-function 'pdf-view-display-image) #'ignore)
+              ((symbol-function 'pdf-info-renderpage-highlight)
+               (lambda (_page _width _file &rest regions) (setq drawn regions))))
+      ;; A faint fill, and an edge the color the fill looks on white paper.
+      (let ((kokoro-pdf-highlight-style 'marker))
+        (kokoro--pdf-show-boxes 3 '((0.1 0.2 0.5 0.3)))
+        (should (equal drawn '(("#ffd84d" "#fff5d2" 0.25 (0.1 0.2 0.5 0.3))))))
+      ;; Underlines are a thin bar under each line, leaving the words clear.
+      (let ((kokoro-pdf-highlight-style 'underline))
+        (kokoro--pdf-show-boxes 3 '((0.1 0.2 0.5 0.3)))
+        (pcase-let ((`((,_ ,_ ,opacity (,l ,top ,r ,bottom))) drawn))
+          (should (= opacity 0.5))
+          (should (equal (list l r) '(0.1 0.5)))
+          (should (= top 0.3))
+          (should (< (abs (- bottom 0.31)) 1e-9)))))))
 
 (ert-deftest kokoro-test-pdf-page-margins-and-numbers ()
   (let ((kokoro-pdf-margins '(0.1 . 0.1))
@@ -421,6 +729,24 @@
                   (kill-buffer)))
             (delete-file other)))
         (should-error (kokoro-set-pdf-margins 60 50) :type 'user-error)))))
+
+(ert-deftest kokoro-test-hyphenated-over-lines ()
+  ;; "Liber-" at the end of a line and "ation" on the next: one word.
+  (dolist (text (list "The Liber-\nation of oxygen."
+                      "The Liber- \n   ation of oxygen."     ; spaces around the break
+                      "The Liber­\nation of oxygen."    ; soft hyphen, as in PDFs
+                      "The Liber‐\nation of oxygen."))  ; Unicode hyphen
+    (should (equal (kokoro-test--sentences text) (list text)))
+    (should (equal (kokoro--text text) "The Liberation of oxygen.")))
+  (should (equal (kokoro--text "Liber­ation") "Liberation"))
+  ;; Hyphens within a line, and numbers, stay.
+  (should (equal (kokoro--text "A well-known one-\nliner") "A well-known oneliner"))
+  ;; A long sentence is not cut between the halves.
+  (let* ((kokoro-max-chars 40)
+         (parts (kokoro-test--sentences
+                 (concat (mapconcat #'identity (make-list 6 "word") " ") " liber-\nation "
+                         (mapconcat #'identity (make-list 6 "word") " ")))))
+    (should-not (cl-some (lambda (p) (string-match-p "-\\'" (string-trim p))) parts))))
 
 (ert-deftest kokoro-test-pdf-sentence-carried-over ()
   (kokoro-test--with-fake-server
