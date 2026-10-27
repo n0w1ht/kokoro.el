@@ -160,8 +160,8 @@ added with \\[kokoro-skip-text]."
   :safe (lambda (v) (and (listp v) (cl-every #'stringp v))))
 
 (defcustom kokoro-text-functions
-  '(kokoro-text-remove kokoro-text-links kokoro-text-markup kokoro-text-pronounce
-    kokoro-text-whitespace)
+  '(kokoro-text-remove kokoro-text-links kokoro-text-symbols kokoro-text-markup
+    kokoro-text-pronounce kokoro-text-whitespace)
   "Functions that turn a sentence from the buffer into what is spoken.
 Each takes a string and returns a string; they run in order."
   :type '(repeat function))
@@ -173,13 +173,35 @@ Each takes a string and returns a string; they run in order."
     ("mg/dL" . "milligrams per deciliter") ("mmol/L" . "millimoles per liter")
     ("mg/kg" . "milligrams per kilogram")
     ("mg" . "milligrams") ("mcg" . "micrograms") ("µg" . "micrograms")
-    ("kg" . "kilograms") ("mL" . "milliliters") ("dL" . "deciliters")
+    ("ng" . "nanograms") ("kg" . "kilograms")
+    ("mL" . "milliliters") ("µL" . "microliters") ("dL" . "deciliters")
+    ("mmol" . "millimoles") ("µmol" . "micromoles") ("nmol" . "nanomoles")
+    ("mEq" . "milliequivalents") ("µm" . "micrometers")
+    ("mm" . "millimeters") ("cm" . "centimeters")
     ("mmHg" . "millimeters of mercury")
     ("b.i.d." . "twice a day") ("t.i.d." . "three times a day")
     ("q.i.d." . "four times a day") ("p.r.n." . "as needed") ("p.o." . "by mouth"))
   "How to say words the voice gets wrong: an alist (TEXT . SPOKEN).
 TEXT matches as a whole word, with case; earlier entries are tried first,
 so put longer ones (\"mg/dL\") before shorter ones (\"mg\")."
+  :type '(alist :key-type string :value-type string))
+
+(defcustom kokoro-symbols
+  '(("-->" . "leads to") ("->" . "leads to")
+    ("≥" . "greater than or equal to") ("≤" . "less than or equal to")
+    ("≠" . "not equal to") ("≈" . "approximately") ("±" . "plus or minus")
+    ("→" . "leads to") ("←" . "comes from") ("↔" . "and back")
+    ("↑" . "increased") ("↓" . "decreased") ("×" . "times") ("÷" . "divided by")
+    ("°C" . "degrees Celsius") ("°F" . "degrees Fahrenheit") ("°" . "degrees")
+    ("‰" . "per thousand") ("∞" . "infinity") ("√" . "square root of")
+    ("α" . "alpha") ("β" . "beta") ("γ" . "gamma") ("δ" . "delta") ("ε" . "epsilon")
+    ("ζ" . "zeta") ("η" . "eta") ("θ" . "theta") ("κ" . "kappa") ("λ" . "lambda")
+    ("μ" . "mu") ("ν" . "nu") ("ξ" . "xi") ("π" . "pi") ("ρ" . "rho") ("σ" . "sigma")
+    ("τ" . "tau") ("φ" . "phi") ("χ" . "chi") ("ψ" . "psi") ("ω" . "omega")
+    ("Δ" . "delta") ("Σ" . "sum of") ("Ω" . "omega"))
+  "How to say symbols: an alist (SYMBOL . SPOKEN), used by `kokoro-text-symbols'.
+SYMBOL matches anywhere, not only as a word.  Earlier entries are tried
+first."
   :type '(alist :key-type string :value-type string))
 
 (defcustom kokoro-abbreviations
@@ -440,6 +462,87 @@ SAY is nil, or what to say instead of the text, for a skipped part."
     (replace-regexp-in-string "\\[\\[\\([^]]*\\)\\]\\]" "\\1")
     (replace-regexp-in-string "\\[\\([^]]*\\)\\]([^)]*)" "\\1")
     (replace-regexp-in-string "https?://[^ \t\n]+" "link")))
+
+(defconst kokoro--superscripts "⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺"
+  "Superscript characters; the same position in \"0123456789-+\" is what they are.")
+
+(defconst kokoro--subscripts "₀₁₂₃₄₅₆₇₈₉₋₊"
+  "Subscript characters, like `kokoro--superscripts'.")
+
+(defun kokoro--unsuperscript (string &optional chars)
+  "STRING with the superscripts (or CHARS) in it made plain digits and signs."
+  (apply #'string (mapcar (lambda (c)
+                            (if-let* ((i (seq-position (or chars kokoro--superscripts) c)))
+                                (aref "0123456789-+" i)
+                              c))
+                          string)))
+
+(defun kokoro-text-symbols (text)
+  "Say the symbols, powers, ranges and comparisons in TEXT in words.
+\"×10⁹/L\" becomes \"times 10 to the 9 per liter\", \"5–10\" \"5 to 10\",
+\"> 140\" \"greater than 140\" and \"m²\" \"square meters\".  Superscript
+numbers after a word, mostly references, are left out.  Other symbols
+are said as `kokoro-symbols' says."
+  (let ((case-fold-search nil)
+        (sup (concat "[" kokoro--superscripts "]+")))
+    (cl-flet ((sub (regexp rep &optional subexp)
+                (setq text (replace-regexp-in-string regexp rep text t nil subexp))))
+      ;; The Greek mu typed for the micro sign, before units.
+      (sub "μ\\(g\\|L\\|l\\|m\\|mol\\|M\\)\\b" "µ\\1")
+      ;; Powers: 10⁹, 10^9, 10^-3.
+      (sub (concat "\\b10\\(" sup "\\)")
+           (lambda (m) (concat "10 to the " (kokoro--unsuperscript (match-string 1 m)))))
+      (sub "\\b10\\^\\([-+]?[0-9]+\\)" "10 to the \\1")
+      ;; Areas and volumes.
+      (sub "\\b\\(k?m\\|[cmµ]m\\)\\([²³]\\)"
+           (lambda (m)
+             (concat (if (equal (match-string 2 m) "²") "square " "cubic ")
+                     (pcase (match-string 1 m)
+                       ("m" "meters") ("km" "kilometers") ("cm" "centimeters")
+                       ("mm" "millimeters") ("µm" "micrometers")))))
+      ;; Superscripts left after a word or a closing mark: references.
+      (sub (concat "\\([[:alpha:].,;:)]\\)" sup "\\(?:[,–-]" sup "\\)*") "\\1")
+      ;; Per unit of time or volume: "beats/min", "×10⁹/L".
+      (sub "\\([[:alnum:]]\\)/\\(L\\|min\\|h\\|hr\\|day\\|d\\|wk\\|kg\\|s\\)\\b"
+           (lambda (m)
+             (concat (match-string 1 m) " per "
+                     (pcase (match-string 2 m)
+                       ("L" "liter") ("min" "minute") ((or "h" "hr") "hour")
+                       ((or "day" "d") "day") ("wk" "week") ("kg" "kilogram")
+                       ("s" "second")))))
+      ;; Ranges of numbers, but not dates like 2026-10-27.
+      (sub "\\(?:^\\|[^-–0-9.]\\)[0-9]+\\(?:\\.[0-9]+\\)?\\([–-]\\)[0-9]+\\(?:\\.[0-9]+\\)?\\(?:$\\|[^-–0-9]\\)"
+           " to " 1)
+      ;; Comparisons, not quotes or arrows: "> 140", "(<0.5)".
+      (sub "\\(?:^\\|[ (]\\)\\(>=?\\|<=?\\)[ \t]*[0-9.]"
+           (lambda (m)
+             (pcase (match-string 1 m)
+               (">" "greater than ") ("<" "less than ")
+               (">=" "greater than or equal to ") ("<=" "less than or equal to ")))
+           1)
+      ;; Subscripts: "α₁" is "alpha 1", "CO₂" "CO 2".
+      (sub (concat "[" kokoro--subscripts "]+")
+           (lambda (m) (concat " " (kokoro--unsuperscript m kokoro--subscripts))))
+      (sub " = " " equals ")
+      (kokoro--say-symbols text))))
+
+(defun kokoro--say-symbols (text)
+  "Replace the symbols of `kokoro-symbols' in TEXT.
+A space is put between the words and a letter or number next to them."
+  (with-temp-buffer
+    (insert text)
+    (pcase-dolist (`(,symbol . ,spoken) kokoro-symbols)
+      (goto-char (point-min))
+      (while (search-forward symbol nil t)
+        (replace-match spoken t t)
+        (let ((end (point)))
+          (when (and (char-after) (string-match-p "[[:alnum:]]" (string (char-after))))
+            (insert " "))
+          (goto-char (- end (length spoken)))
+          (when (and (char-before) (string-match-p "[[:alnum:]]" (string (char-before))))
+            (insert " "))
+          (goto-char end))))
+    (buffer-string)))
 
 (defun kokoro-text-markup (text)
   "Remove markup characters from TEXT."

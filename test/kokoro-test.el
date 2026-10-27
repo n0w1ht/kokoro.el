@@ -92,6 +92,20 @@
                  "A bold and code hyphenated line."))
   (should (equal (kokoro--text "Go to https://example.com/x now") "Go to link now")))
 
+(ert-deftest kokoro-test-symbols ()
+  (should (equal (kokoro--text "WBC 11×10⁹/L, platelets 150–400 ×10^9/L.")
+                 "WBC 11 times 10 to the 9 per liter, platelets 150 to 400 times 10 to the 9 per liter."))
+  (should (equal (kokoro--text "HR 72 beats/min; 38.5 °C; BP > 140/90, K+ <3.5.")
+                 "HR 72 beats per minute; 38.5 degrees Celsius; BP greater than 140/90, K+ less than 3.5."))
+  ;; References in superscript are left out; Greek letters and subscripts said.
+  (should (equal (kokoro--text "β-blockers cut mortality¹²,¹³ and α₁ tone.²")
+                 "beta-blockers cut mortality and alpha 1 tone."))
+  (should (equal (kokoro--text "2 m² and 5 μg, ↑ TSH → ↓ T4, pH = 7.4 ± 0.1, HbA1c ≥ 6.5%.")
+                 "2 square meters and 5 micrograms, increased TSH leads to decreased T4, pH equals 7.4 plus or minus 0.1, HbA1c greater than or equal to 6.5%."))
+  ;; Dates are not ranges; a quote mark is not a comparison.
+  (should (equal (kokoro--text "On 2026-10-27, read 5-10.") "On 2026-10-27, read 5 to 10."))
+  (should (equal (kokoro--text "> Quoted line") "Quoted line")))
+
 (ert-deftest kokoro-test-pronunciations ()
   (should (equal (kokoro--text "Give 5 mg p.o. b.i.d., e.g. with food.")
                  "Give 5 milligrams by mouth twice a day, for example with food."))

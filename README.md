@@ -14,6 +14,10 @@ Read buffers, EPUB books (nov.el) and PDFs (pdf-tools) aloud in Emacs with the
   (`kokoro-skip-rules`).
 - Abbreviations such as "Dr.", "e.g.", "Fig." and "et al." do not end a
   sentence (`kokoro-abbreviations`).
+- Symbols and numbers in medical and science text are said in words: "×10⁹/L"
+  as "times 10 to the 9 per liter", "150–400" as "150 to 400", "≥", "±", "→",
+  "°C", Greek letters and subscripts; superscript reference numbers are left
+  out (`kokoro-symbols`, `kokoro-text-symbols`).
 - Words the voice gets wrong can be given a pronunciation
   (`kokoro-pronunciations`, which comes with common medical units and dosing
   abbreviations), and any function can be added to `kokoro-text-functions`.
@@ -148,6 +152,7 @@ with `b` British English; the voice list shows which are female and male.
 | `kokoro-remember-place` | Remember where reading got to in each file (`C-c t c`)     |
 | `kokoro-remove-regexps` | Regexps of text left out in every file                     |
 | `kokoro-pronunciations` | `("mg" . "milligrams")` pairs, matched as whole words      |
+| `kokoro-symbols`        | `("≥" . "greater than or equal to")` pairs, matched anywhere |
 | `kokoro-text-functions` | Functions a sentence passes through before it is spoken    |
 | `kokoro-abbreviations`  | Words ending in "." that do not end a sentence             |
 | `kokoro-skip-rules`     | Parts not read, per major mode                             |
