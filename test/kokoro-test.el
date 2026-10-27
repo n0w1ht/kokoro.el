@@ -424,6 +424,98 @@
               (kokoro-stop))
             (kill-buffer)))))))
 
+;;;; Moving about
+
+(ert-deftest kokoro-test-repeat-and-paragraphs ()
+  (kokoro-test--with-fake-server
+    (with-temp-buffer
+      (insert "One a. One b.\n\nTwo a. Two b.\n\nThree a.")
+      (kokoro-read-buffer)
+      (kokoro-test--play (car (car kokoro--pending)))           ; One a.
+      (setq sent nil)
+      (kokoro-repeat)
+      (should (equal (car (kokoro-test--spoken sent)) "One a."))
+      (kokoro-test--play (car (car kokoro--pending)))
+      (setq sent nil)
+      (kokoro-next-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "Two a."))
+      (kokoro--handle (list :event "end" :id (car (car kokoro--pending))))
+      (kokoro-test--play (car (car kokoro--pending)))           ; Two b.
+      ;; Back to the start of this paragraph, then to the one before.
+      (setq sent nil)
+      (kokoro-previous-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "Two a."))
+      (kokoro-test--play (car (car kokoro--pending)))
+      (setq sent nil)
+      (kokoro-previous-paragraph)
+      (should (equal (car (kokoro-test--spoken sent)) "One a."))
+      ;; From the last paragraph, skipping on ends the reading.
+      (kokoro-stop)
+      (goto-char (point-max))
+      (kokoro-read-paragraph)
+      (kokoro-test--play (car (car kokoro--pending)))
+      (kokoro-next-paragraph)
+      (should-not kokoro--session))
+    (should-error (kokoro-repeat) :type 'user-error)))
+
+(ert-deftest kokoro-test-pdf-back-and-forth-across-pages ()
+  (kokoro-test--with-fake-server
+    (let ((pages '((1 . "First page. Its end.") (2 . "Second page. More here.")))
+          (pdf (generate-new-buffer "pdf")))
+      (cl-letf (((symbol-function 'pdf-info-number-of-pages) (lambda () 2))
+                ((symbol-function 'pdf-info-charlayout)
+                 (lambda (page)
+                   (mapcar (lambda (c) (list c '(0.1 0.5 0.2 0.52))) (alist-get page pages)))))
+        (unwind-protect
+            (progn
+              (kokoro--read-pdf-page pdf 2)
+              (kokoro-test--play (car (car kokoro--pending)))   ; Second page.
+              ;; Previous at the top of a page: last sentence of the one before.
+              (setq sent nil)
+              (kokoro-previous)
+              (should (= (plist-get kokoro--session :page) 1))
+              (should (equal (kokoro-test--spoken sent) '("Its end.")))
+              (kokoro-test--play (car (car kokoro--pending)))
+              ;; ] turns the page; [ at its top goes to the start of the one before.
+              (setq sent nil)
+              (kokoro-next-paragraph)
+              (should (= (plist-get kokoro--session :page) 2))
+              (kokoro-test--play (car (car kokoro--pending)))
+              (setq sent nil)
+              (kokoro-previous-paragraph)
+              (should (= (plist-get kokoro--session :page) 1))
+              (should (equal (car (kokoro-test--spoken sent)) "First page."))
+              ;; On page 1 there is nothing before: previous stays on it.
+              (kokoro-test--play (car (car kokoro--pending)))
+              (kokoro-previous)
+              (should (= (plist-get kokoro--session :page) 1)))
+          (kokoro-stop)
+          (kill-buffer pdf))))))
+
+(ert-deftest kokoro-test-epub-previous-chapter ()
+  (kokoro-test--with-fake-server
+    (let ((chapters ["One first. One last." "Two first. Two last."]))
+      (with-temp-buffer
+        (setq-local nov-documents (vector 'a 'b))
+        (setq-local nov-documents-index 1)
+        (insert (aref chapters 1))
+        (cl-letf (((symbol-function 'derived-mode-p)
+                   (lambda (&rest modes) (memq 'nov-mode modes)))
+                  ((symbol-function 'nov-previous-document)
+                   (lambda ()
+                     (setq nov-documents-index (1- nov-documents-index))
+                     (erase-buffer)
+                     (insert (aref chapters nov-documents-index)))))
+          (kokoro-read-buffer)
+          (kokoro-test--play (car (car kokoro--pending)))
+          (setq sent nil)
+          (kokoro-previous)
+          (should (= nov-documents-index 0))
+          (should (equal (kokoro-test--spoken sent) '("One last.")))
+          ;; Chapter one has none before it.
+          (should-not (plist-get kokoro--session :prev))
+          (kokoro-stop))))))
+
 ;;;; Voice description
 
 (ert-deftest kokoro-test-voice-description ()

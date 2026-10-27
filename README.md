@@ -73,7 +73,9 @@ Then in your init file:
 | `C-c t c`   | `kokoro-resume`             | Read on from where you stopped in this file; `C-u`: pick a file |
 | `C-c t SPC` | `kokoro-pause`              | Pause or resume                                           |
 | `C-c t s`   | `kokoro-stop`               | Stop                                                      |
-| `C-c t n/p` | `kokoro-next/previous`      | Skip to the next or previous sentence                     |
+| `C-c t n/p` | `kokoro-next/previous`      | Skip to the next or previous sentence, also across pages and chapters |
+| `C-c t ]/[` | `kokoro-next/previous-paragraph` | Skip to the next or previous paragraph; in a PDF, page |
+| `C-c t ,`   | `kokoro-repeat`             | Read the sentence again                                   |
 | `C-c t v`   | `kokoro-select-voice`       | Choose a voice (applies from the current sentence)        |
 | `C-c t S`   | `kokoro-set-speed`          | Set the speed, 0.5 to 2.0                                 |
 | `C-c t +/-` | `kokoro-faster/slower`      | Change speed by 0.1                                       |

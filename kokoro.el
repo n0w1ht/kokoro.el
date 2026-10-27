@@ -34,7 +34,10 @@
 ;;   C-c t c     read on from where you stopped in this file (C-u: in
 ;;               another file read before)
 ;;   C-c t SPC   pause or resume          C-c t s   stop
-;;   C-c t n/p   skip to the next/previous sentence
+;;   C-c t n/p   skip to the next/previous sentence, also across PDF
+;;               pages and EPUB chapters
+;;   C-c t ]/[   skip to the next/previous paragraph (PDF: page)
+;;   C-c t ,     read the sentence again
 ;;   C-c t v     choose the voice         C-c t +/- faster/slower
 ;;   C-c t S     set the speed
 ;;   C-c t w     narrate a file (txt, md, pdf, docx) into a WAV file
@@ -68,6 +71,7 @@
 (declare-function pdf-view-redisplay "ext:pdf-view")
 (declare-function nov-next-document "ext:nov")
 (declare-function nov-goto-document "ext:nov")
+(declare-function nov-previous-document "ext:nov")
 (defvar nov-documents)
 (defvar nov-documents-index)
 (defvar nov-file-name)
@@ -228,9 +232,11 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
   "What is being read: a plist.
 :buffer, :pos and :end say where the text is.  :display is the buffer
 the reader sees (the PDF for a PDF page), and :page the PDF page being
-read.  :next is nil or a function
-that starts the following page or chapter and returns non-nil when it
-did.  :progress is nil or a function returning where the reading is.")
+read, with :skip characters at its start left out.  :next is nil or a
+function that starts the following page or chapter and returns non-nil
+when it did.  :prev is nil or a function that starts the page or chapter
+before, from its start, or from its last sentence when called with
+`last'.  :progress is nil or a function returning where the reading is.")
 (defvar kokoro--pending nil
   "Sentences handed to the server, oldest first: lists (ID BEG END).")
 (defvar kokoro--current nil "Entry of `kokoro--pending' being spoken.")
@@ -391,6 +397,14 @@ SAY is nil, or what to say instead of the text, for a skipped part."
               (when (string-match-p "[[:alnum:]]" (buffer-substring-no-properties beg (point)))
                 (setq found (list beg (point) nil)))))))
       found)))
+
+(defun kokoro--last-sentence-start (beg end)
+  "Where the last sentence between BEG and END begins, or BEG."
+  (let ((pos beg) last span)
+    (while (setq span (kokoro--next-sentence pos end))
+      (setq last (car span)
+            pos (nth 1 span)))
+    (or last beg)))
 
 (defun kokoro--sentence-start ()
   "Position where the sentence at point begins."
@@ -726,13 +740,27 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
                                             (nth 0 span) (nth 1 span))))))
             t))))))
 
-(defun kokoro--finish ()
-  "End of the session: go on to the next page or chapter, or stop."
+(defun kokoro--finish (&optional skip)
+  "End of the session: go on to the next page or chapter, or stop.
+When SKIP is non-nil, go on even if `kokoro-continue' is nil."
   (let ((next (plist-get kokoro--session :next)))
     (kokoro--clear)
-    (unless (and next kokoro-continue (funcall next))
+    (unless (and next (or skip kokoro-continue) (funcall next))
       (kokoro--ui-end)
       (message "Kokoro: done"))))
+
+(defun kokoro--go-back (from)
+  "Read the page or chapter before, FROM its start (nil) or `last' sentence.
+Return nil, reading on as before, when there is none."
+  (when-let* ((prev (plist-get kokoro--session :prev)))
+    (kokoro--clear)
+    (funcall prev from)
+    t))
+
+(defun kokoro--at-first-sentence-p (entry)
+  "Non-nil if no sentence comes before ENTRY's in the text being read."
+  (with-current-buffer (marker-buffer (nth 1 entry))
+    (not (kokoro--next-sentence (point-min) (nth 1 entry)))))
 
 (defun kokoro--show (entry)
   "Highlight the sentence of ENTRY and keep it in view."
@@ -767,11 +795,9 @@ PROPS may give :next, :display and :progress; see `kokoro--session'."
       (user-error "Kokoro is not reading"))
     (let* ((buf (plist-get s :buffer))
            (end (marker-position (plist-get s :end)))
-           (props (list :next (plist-get s :next)
-                        :display (plist-get s :display)
-                        :page (plist-get s :page)
-                        :skip (plist-get s :skip)
-                        :progress (plist-get s :progress)))
+           (props (cl-loop for (key value) on s by #'cddr
+                           unless (memq key '(:buffer :pos :end))
+                           append (list key value)))
            (start (with-current-buffer buf
                     (save-excursion (funcall move entry) (point)))))
       (with-current-buffer buf
@@ -912,6 +938,8 @@ open it there."
   (when (derived-mode-p 'nov-mode)
     (let ((buf (current-buffer)))
       (list :next (lambda () (kokoro--nov-next buf))
+            :prev (and (> nov-documents-index 0)
+                       (lambda (from) (kokoro--nov-previous buf from)))
             :progress (lambda ()
                         (with-current-buffer buf
                           (format "chapter %d/%d" (1+ nov-documents-index)
@@ -927,6 +955,18 @@ open it there."
     (with-current-buffer buf
       (kokoro--read (point-min) (point-max) (kokoro--book-props)))
     t))
+
+(defun kokoro--nov-previous (buf from)
+  "Read the chapter before the one in BUF, FROM its start or `last' sentence."
+  (when (buffer-live-p buf)
+    (if-let* ((win (get-buffer-window buf t)))
+        (with-selected-window win (nov-previous-document))
+      (with-current-buffer buf (nov-previous-document)))
+    (with-current-buffer buf
+      (kokoro--read (if (eq from 'last)
+                        (kokoro--last-sentence-start (point-min) (point-max))
+                      (point-min))
+                    (point-max) (kokoro--book-props)))))
 
 ;;;; PDF
 
@@ -961,9 +1001,10 @@ property `kokoro-pdf', as (PAGE LEFT TOP RIGHT BOTTOM)."
     (or (bobp)
         (looking-back "[.!?:;][\"'”’)]*" (max (point-min) (- (point) 4))))))
 
-(defun kokoro--read-pdf-page (pdf page &optional skip)
+(defun kokoro--read-pdf-page (pdf page &optional skip from)
   "Read PAGE of the PDF buffer PDF, then the pages after it.
 SKIP characters at the start of the page were read with the page before.
+When FROM is `last', start at the page's last sentence.
 A sentence running onto the next page is finished before turning it."
   (kokoro--apply-source pdf)            ; its own margins, before reading the page
   (let ((pages (with-current-buffer pdf (pdf-info-number-of-pages)))
@@ -989,11 +1030,16 @@ A sentence running onto the next page is finished before turning it."
             (setq carry (- (point) joined))
             (delete-region (point) (point-max)))))
       (message "Kokoro: page %d" page)
-      (kokoro--read (point-min) (point-max)
+      (kokoro--read (if (eq from 'last)
+                        (kokoro--last-sentence-start (point-min) (point-max))
+                      (point-min))
+                    (point-max)
                     (list :display pdf
                           :page page
                           :skip (or skip 0)
                           :next (lambda () (kokoro--pdf-next pdf page carry))
+                          :prev (and (> page 1)
+                                     (lambda (from) (kokoro--pdf-previous pdf page from)))
                           :progress (lambda () (format "page %d/%d" page pages)))))))
 
 (defun kokoro--pdf-next (pdf page carry)
@@ -1003,6 +1049,13 @@ A sentence running onto the next page is finished before turning it."
       (with-selected-window win (pdf-view-goto-page (1+ page) win)))
     (kokoro--read-pdf-page pdf (1+ page) carry)
     t))
+
+(defun kokoro--pdf-previous (pdf page from)
+  "Read the page before PAGE of PDF, FROM its start or `last' sentence."
+  (when (buffer-live-p pdf)
+    (when-let* ((win (get-buffer-window pdf t)))
+      (with-selected-window win (pdf-view-goto-page (1- page) win)))
+    (kokoro--read-pdf-page pdf (1- page) nil from)))
 
 (defun kokoro--pdf-boxes (beg end)
   "Boxes covering the text from BEG to END on its PDF pages.
@@ -1232,12 +1285,62 @@ In a PDF, read the selected text, or the pages from the current one on."
   (kokoro--restart (lambda (e) (goto-char (nth 2 e)))))
 
 (defun kokoro-previous ()
-  "Go back to the sentence before the one being read."
+  "Go back to the sentence before the one being read.
+At the start of a PDF page or EPUB chapter, go back to the last
+sentence of the one before."
   (interactive)
-  (kokoro--restart (lambda (e)
-                     (goto-char (nth 1 e))
-                     (let ((sentence-end-double-space nil))
-                       (backward-sentence)))))
+  (unless (and kokoro--current
+               (kokoro--at-first-sentence-p kokoro--current)
+               (kokoro--go-back 'last))
+    (kokoro--restart (lambda (e)
+                       (goto-char (nth 1 e))
+                       (let ((sentence-end-double-space nil))
+                         (backward-sentence))))))
+
+(defun kokoro-repeat ()
+  "Read the sentence being read again."
+  (interactive)
+  (unless kokoro--current
+    (user-error "Kokoro is not reading"))
+  (kokoro--again))
+
+(defun kokoro-next-paragraph ()
+  "Skip to the next paragraph.  In a PDF, skip to the next page."
+  (interactive)
+  (let ((entry kokoro--current)
+        (s kokoro--session))
+    (unless (and entry s)
+      (user-error "Kokoro is not reading"))
+    (if (plist-get s :page)
+        (kokoro--finish t)
+      (let ((start (with-current-buffer (marker-buffer (nth 2 entry))
+                     (save-excursion
+                       (goto-char (nth 2 entry))
+                       (forward-paragraph)
+                       (point)))))
+        (if (kokoro--next-sentence start (plist-get s :end))
+            (kokoro--restart (lambda (_) (goto-char start)))
+          (kokoro--finish t))))))
+
+(defun kokoro-previous-paragraph ()
+  "Go back to the start of the paragraph, or of the one before at its start.
+In a PDF, go back to the start of the page, or of the page before."
+  (interactive)
+  (let ((entry kokoro--current)
+        (s kokoro--session))
+    (unless (and entry s)
+      (user-error "Kokoro is not reading"))
+    (cond
+     ((and (kokoro--at-first-sentence-p entry) (kokoro--go-back nil)))
+     ((plist-get s :page)
+      (kokoro--restart (lambda (_) (goto-char (point-min)))))
+     (t
+      (kokoro--restart
+       (lambda (e)
+         (goto-char (nth 1 e))
+         (backward-paragraph)
+         (unless (kokoro--next-sentence (point) (nth 1 e)) ; it was at the start
+           (backward-paragraph))))))))
 
 (defun kokoro--again ()
   "Read the current sentence again, e.g. with a new voice or speed."
@@ -1340,6 +1443,9 @@ When DELETE-INPUT is non-nil, delete FILE once done."
   "s" #'kokoro-stop
   "n" #'kokoro-next
   "p" #'kokoro-previous
+  "," #'kokoro-repeat
+  "]" #'kokoro-next-paragraph
+  "[" #'kokoro-previous-paragraph
   "v" #'kokoro-select-voice
   "S" #'kokoro-set-speed
   "+" #'kokoro-faster
