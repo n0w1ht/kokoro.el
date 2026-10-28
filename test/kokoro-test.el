@@ -650,24 +650,30 @@
                           (cdr page))))
           boxes))
 
-(ert-deftest kokoro-test-pdf-highlight-is-see-through ()
+(ert-deftest kokoro-test-pdf-highlight-has-no-outline ()
   (let ((kokoro-pdf-highlight-color "#ffd84d")
         (kokoro-pdf-highlight-opacity 0.25)
-        drawn)
+        marker underline)
     (cl-letf (((symbol-function 'pdf-view-image-size) (lambda (&rest _) '(800 . 1000)))
               ((symbol-function 'pdf-view-create-image) (lambda (data &rest _) data))
               ((symbol-function 'pdf-view-display-image) #'ignore)
+              ((symbol-function 'pdf-info-renderpage-text-regions)
+               (lambda (_page _width single _style _file &rest regions)
+                 (setq marker (cons single regions))))
               ((symbol-function 'pdf-info-renderpage-highlight)
-               (lambda (_page _width _file &rest regions) (setq drawn regions))))
-      ;; A faint fill, and an edge the color the fill looks on white paper.
+               (lambda (_page _width _file &rest regions) (setq underline regions))))
+      ;; The marker is drawn like a selection: the words in black on the
+      ;; pale color the highlight has on white paper, with no box around.
       (let ((kokoro-pdf-highlight-style 'marker))
         (kokoro--pdf-show-boxes 3 '((0.1 0.2 0.5 0.3)))
-        (should (equal drawn '(("#ffd84d" "#fff5d2" 0.25 (0.1 0.2 0.5 0.3))))))
-      ;; Underlines are a thin bar under each line, leaving the words clear.
+        (should (equal marker '(t ("black" "#fff5d2" (0.1 0.2 0.5 0.3)))))
+        (should-not underline))
+      ;; Underlines are a thin solid bar under each line, leaving the words clear.
       (let ((kokoro-pdf-highlight-style 'underline))
         (kokoro--pdf-show-boxes 3 '((0.1 0.2 0.5 0.3)))
-        (pcase-let ((`((,_ ,_ ,opacity (,l ,top ,r ,bottom))) drawn))
-          (should (= opacity 0.5))
+        (pcase-let ((`((,fill ,edge ,opacity (,l ,top ,r ,bottom))) underline))
+          (should (equal fill edge))
+          (should (= opacity 1.0))
           (should (equal (list l r) '(0.1 0.5)))
           (should (= top 0.3))
           (should (< (abs (- bottom 0.31)) 1e-9)))))))

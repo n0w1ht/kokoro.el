@@ -73,6 +73,8 @@
 (declare-function pdf-view-create-image "ext:pdf-view")
 (declare-function pdf-view-image-size "ext:pdf-view")
 (declare-function pdf-info-renderpage-highlight "ext:pdf-info")
+(declare-function pdf-info-renderpage-text-regions "ext:pdf-info")
+(defvar pdf-view-midnight-colors)
 (declare-function pdf-view-redisplay "ext:pdf-view")
 (declare-function nov-next-document "ext:nov")
 (declare-function nov-goto-document "ext:nov")
@@ -247,7 +249,7 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
 
 (defcustom kokoro-pdf-highlight-style 'marker
   "How the sentence being read is shown on a PDF page.
-`marker': a see-through color over the words, like a highlighter pen.
+`marker': a pale color behind the words, like a highlighter pen.
 `underline': a line under the words, which leaves them uncovered."
   :type '(choice (const :tag "Highlighter pen" marker)
                  (const :tag "Underline" underline)))
@@ -256,9 +258,10 @@ can have its own, set with \\[kokoro-set-pdf-margins]."
   "Color of the sentence being read on a PDF page."
   :type 'color)
 
-(defcustom kokoro-pdf-highlight-opacity 0.22
-  "How strongly `kokoro-pdf-highlight-color' covers the words, 0.0 to 1.0.
-Lower is fainter.  Underlines are drawn at twice this, at most fully."
+(defcustom kokoro-pdf-highlight-opacity 0.3
+  "How deep `kokoro-pdf-highlight-color' is on a PDF page, 0.0 to 1.0.
+Lower is paler; the words stay on top of it.  Underlines are drawn at
+twice this, at most fully."
   :type 'number)
 
 (defface kokoro-sentence '((t :inherit highlight))
@@ -1237,20 +1240,33 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
                                '(1 2 3))
                      (color-name-to-rgb color))))))
 
+(defun kokoro--pdf-text-color ()
+  "Color of the words on the page: black, or the night color."
+  (if (and (bound-and-true-p pdf-view-midnight-minor-mode)
+           (consp (bound-and-true-p pdf-view-midnight-colors)))
+      (car pdf-view-midnight-colors)
+    "black"))
+
 (defun kokoro--pdf-show-boxes (page boxes)
   "Show PAGE in the selected window with BOXES highlighted."
   (let* ((width (car (pdf-view-image-size)))
-         (opacity (min 1.0 (if (eq kokoro-pdf-highlight-style 'underline)
+         (underline (eq kokoro-pdf-highlight-style 'underline))
+         (opacity (min 1.0 (if underline
                                (* 2 kokoro-pdf-highlight-opacity)
                              kokoro-pdf-highlight-opacity)))
-         ;; pdf-tools outlines each box in a solid color: the one the
-         ;; see-through fill has, so there is no hard edge.
-         (edge (kokoro--pdf-blend kokoro-pdf-highlight-color opacity)))
+         (color (kokoro--pdf-blend kokoro-pdf-highlight-color opacity)))
     (pdf-view-display-image
      (pdf-view-create-image
-         (pdf-info-renderpage-highlight
-          page width nil
-          `(,kokoro-pdf-highlight-color ,edge ,opacity ,@(kokoro--pdf-marks boxes)))
+         (if underline
+             (pdf-info-renderpage-highlight
+              page width nil
+              `(,color ,color 1.0 ,@(kokoro--pdf-marks boxes)))
+           ;; Like a text selection, with the words drawn again on top in
+           ;; their own color: a pale marker, with no outline.  (pdf-tools
+           ;; draws a solid outline around see-through boxes.)
+           (pdf-info-renderpage-text-regions
+            page width t 'glyph nil
+            `(,(kokoro--pdf-text-color) ,color ,@boxes)))
        :width width)
      (and (bound-and-true-p pdf-view-roll-minor-mode) page))))
 
