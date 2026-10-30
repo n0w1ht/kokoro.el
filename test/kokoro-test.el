@@ -593,6 +593,14 @@
 
 ;;;; Voice description
 
+(ert-deftest kokoro-test-model-directory ()
+  (let ((process-environment '("HOME=/home/me")))
+    (let ((kokoro-model-directory nil))
+      (should (equal (kokoro--process-environment "A=1") '("A=1" "HOME=/home/me"))))
+    (let ((kokoro-model-directory "/opt/kokoro"))
+      (should (equal (kokoro--process-environment "A=1")
+                     '("A=1" "HF_HUB_CACHE=/opt/kokoro" "HOME=/home/me"))))))
+
 (ert-deftest kokoro-test-voice-description ()
   (should (equal (kokoro--voice-description "af_heart") "American English, female"))
   (should (equal (kokoro--voice-description "bm_george") "British English, male"))

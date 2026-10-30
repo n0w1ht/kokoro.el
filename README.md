@@ -40,7 +40,8 @@ The first reading after starting Emacs waits a few seconds for the model to load
 - Optional: pdf-tools for PDFs, nov.el for EPUBs
 
 Kokoro runs on the CPU; a GPU is not needed. The model (about 330 MB) is
-downloaded from Hugging Face the first time it is used.
+downloaded from Hugging Face the first time it is used, into the Hugging Face
+cache, or into `kokoro-model-directory` when it is set.
 
 ## Install
 
@@ -165,6 +166,7 @@ with `b` British English; the voice list shows which are female and male.
 | Option                  | What it does                                               |
 |-------------------------|------------------------------------------------------------|
 | `kokoro-voice`, `kokoro-speed` | Voice and speed (can be set per file)              |
+| `kokoro-model-directory` | Where the voice model is kept (nil: the Hugging Face cache) |
 | `kokoro-sources-file`   | Where per-file voice and speed are kept (nil: nowhere)     |
 | `kokoro-remember-place` | Remember where reading got to in each file (`C-c t c`)     |
 | `kokoro-remove-regexps` | Regexps of text left out in every file                     |

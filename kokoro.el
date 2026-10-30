@@ -101,6 +101,20 @@
   "Python interpreter of the environment Kokoro is installed in."
   :type 'file)
 
+(defcustom kokoro-model-directory nil
+  "Directory the voice model is downloaded to and loaded from, or nil.
+When nil, it is the Hugging Face cache, usually ~/.cache/huggingface/hub.
+Changing it downloads the model again there, unless you move the
+models--hexgrad--Kokoro-82M folder from the old place into it."
+  :type '(choice (const :tag "Hugging Face cache" nil) directory))
+
+(defun kokoro--process-environment (&rest vars)
+  "`process-environment' for the Python scripts, with VARS added."
+  (append vars
+          (and kokoro-model-directory
+               (list (concat "HF_HUB_CACHE=" (expand-file-name kokoro-model-directory))))
+          process-environment))
+
 (defcustom kokoro-narrate-script (expand-file-name "narrate.py" kokoro--directory)
   "Script that narrates a document into a WAV file."
   :type 'file)
@@ -301,8 +315,8 @@ before, from its start, or from its last sentence when called with
     (setq kokoro--ready nil
           kokoro--partial "")
     (message "Kokoro: loading the voice model...")
-    (let ((process-environment (append '("PYTHONIOENCODING=utf-8" "PYTHONWARNINGS=ignore")
-                                       process-environment))
+    (let ((process-environment (kokoro--process-environment "PYTHONIOENCODING=utf-8"
+                                                            "PYTHONWARNINGS=ignore"))
           (log (get-buffer-create " *kokoro-log*")))
       (setq kokoro--process
             (make-process :name "kokoro"
@@ -1641,7 +1655,7 @@ In a PDF, every page without its margins; in an EPUB, every chapter."
 (defun kokoro--narrate (args output voice speed &optional delete)
   "Run the narrate script with ARGS into OUTPUT, with VOICE and SPEED.
 DELETE is a file to delete once it is done."
-  (let* ((process-environment (cons "PYTHONIOENCODING=utf-8" process-environment))
+  (let* ((process-environment (kokoro--process-environment "PYTHONIOENCODING=utf-8"))
          (name (file-name-nondirectory output))
          (buffer (get-buffer-create "*kokoro-narrate*"))
          (proc
