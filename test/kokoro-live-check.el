@@ -1,9 +1,12 @@
 ;;; kokoro-live-check.el --- Manual check with the real server  -*- lexical-binding: t; -*-
 ;; Speaks two sentences through the real server.
 ;; Run with: emacs -Q --batch -L .. -l kokoro-live-check.el
+;;   (KOKORO_PYTHON=/path/to/python to use another Python)
 ;; Live check: real server, two sentences (one non-ASCII), log events.
 (require 'kokoro)
-(setq kokoro-python (expand-file-name "~/kokoro-tts/.venv/Scripts/python.exe"))
+;; The default `kokoro-python' fits Windows and Linux; KOKORO_PYTHON overrides it.
+(when-let* ((python (getenv "KOKORO_PYTHON")))
+  (setq kokoro-python (expand-file-name python)))
 (defvar live-events nil)
 (advice-add 'kokoro--handle :before (lambda (e) (push (format "%s %s" (plist-get e :event) (plist-get e :id)) live-events)))
 (with-current-buffer (get-buffer-create "live")
