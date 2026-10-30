@@ -58,6 +58,18 @@ python3 -m venv ~/kokoro-tts/.venv
 Without an NVIDIA GPU, installing the CPU build of PyTorch first saves a large
 download: `pip install torch --index-url https://download.pytorch.org/whl/cpu`.
 
+Kokoro needs Python 3.10 to 3.12. Where the system has a newer one (Debian 13
+has 3.13), [uv](https://docs.astral.sh/uv/) can make the environment with 3.12:
+
+```sh
+uv venv --python 3.12 ~/kokoro-tts/.venv
+uv pip install --python ~/kokoro-tts/.venv/bin/python torch --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python ~/kokoro-tts/.venv/bin/python -r ~/.emacs.d/plugins/kokoro/requirements.txt
+```
+
+Linux also needs PortAudio for sound: `sudo apt install libportaudio2 espeak-ng`
+on Debian and Ubuntu.
+
 Then in your init file:
 
 ```elisp
