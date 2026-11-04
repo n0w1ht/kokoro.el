@@ -755,6 +755,9 @@
   (should (equal (kokoro--text "Liber­ation") "Liberation"))
   ;; Hyphens within a line, and numbers, stay.
   (should (equal (kokoro--text "A well-known one-\nliner") "A well-known oneliner"))
+  ;; A ¬ joins the word even within a line.
+  (should (equal (kokoro--text "The inflam¬ mation and liber¬\nation.")
+                 "The inflammation and liberation."))
   ;; A long sentence is not cut between the halves.
   (let* ((kokoro-max-chars 40)
          (parts (kokoro-test--sentences

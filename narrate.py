@@ -61,6 +61,8 @@ def clean(text: str) -> str:
     # re-join words hyphenated over lines ("liber-" / "ation"), also with
     # soft or Unicode hyphens and spaces around the line break
     text = re.sub(r"([^\W\d_])[-\u00ad\u2010\u2011\u00ac][ \t\r]*\n[ \t]*([^\W\d_])", r"\1\2", text)
+    # a \u00ac where a word was hyphenated joins it, even within a line
+    text = re.sub(r"(\S)\u00ac\s*", r"\1", text)
     text = text.replace("\u00ad", "")
     text = re.sub(r"(?<!\n)\n(?!\n)", " ", text)  # single newlines -> spaces
     text = re.sub(r"[ \t]+", " ", text)

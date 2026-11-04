@@ -608,13 +608,19 @@ A space is put between the words and a letter or number next to them."
 The hyphen can be a soft or Unicode one, as PDFs often have, and spaces
 may come before or after the line break.")
 
+(defconst kokoro--not-sign-hyphen "\\([^ \t\n\r]\\)¬[ \t\r\n]*"
+  "Regexp matching a ¬ that PDFs put where a word was hyphenated, with
+the spaces after it.  It joins the word even within a line.")
+
 (defun kokoro-text-whitespace (text)
   "Join words hyphenated over lines in TEXT and put it on one line.
 \"Liber-\" at the end of a line and \"ation\" on the next are read
-\"Liberation\".  Soft hyphens elsewhere are dropped."
+\"Liberation\", as is \"Liber¬ ation\" anywhere.  Soft hyphens
+elsewhere are dropped."
   (thread-last
     text
     (replace-regexp-in-string kokoro--line-hyphen "\\1\\2")
+    (replace-regexp-in-string kokoro--not-sign-hyphen "\\1")
     (string-replace "\u00ad" "")
     (replace-regexp-in-string "[ \t\n\r\f]+" " ")
     (string-trim)))

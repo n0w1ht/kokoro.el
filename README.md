@@ -19,7 +19,8 @@ Read buffers, EPUB books (nov.el) and PDFs (pdf-tools) aloud in Emacs with the
   "°C", Greek letters and subscripts; superscript reference numbers are left
   out (`kokoro-symbols`, `kokoro-text-symbols`).
 - A word hyphenated over two lines ("Liber-" / "ation") is read as one word,
-  also with the soft and Unicode hyphens PDFs often have.
+  also with the soft and Unicode hyphens PDFs often have. A `¬` joins the
+  word even within a line ("inflam¬ mation" is read "inflammation").
 - Words the voice gets wrong can be given a pronunciation
   (`kokoro-pronunciations`, which comes with common medical units and dosing
   abbreviations), and any function can be added to `kokoro-text-functions`.
