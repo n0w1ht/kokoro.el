@@ -108,11 +108,25 @@ Changing it downloads the model again there, unless you move the
 models--hexgrad--Kokoro-82M folder from the old place into it."
   :type '(choice (const :tag "Hugging Face cache" nil) directory))
 
+(defcustom kokoro-piper-directory nil
+  "Directory of Piper voices (e.g. hu_HU-anna-medium.onnx), or nil.
+Voices named like Piper's are spoken by Piper, for languages Kokoro
+lacks, and downloaded here when missing.  When nil, it is the piper
+folder in `kokoro-model-directory', or ~/.local/share/piper."
+  :type '(choice (const :tag "Default" nil) directory))
+
+(defun kokoro--piper-directory ()
+  (expand-file-name (or kokoro-piper-directory
+                        (if kokoro-model-directory
+                            (expand-file-name "piper" kokoro-model-directory)
+                          "~/.local/share/piper"))))
+
 (defun kokoro--process-environment (&rest vars)
   "`process-environment' for the Python scripts, with VARS added."
   (append vars
           (and kokoro-model-directory
                (list (concat "HF_HUB_CACHE=" (expand-file-name kokoro-model-directory))))
+          (list (concat "KOKORO_PIPER_DIR=" (kokoro--piper-directory)))
           process-environment))
 
 (defcustom kokoro-narrate-script (expand-file-name "narrate.py" kokoro--directory)
@@ -122,6 +136,7 @@ models--hexgrad--Kokoro-82M folder from the old place into it."
 (defcustom kokoro-voice "af_heart"
   "Voice to read with.
 The first letter picks the accent: a for American, b for British English.
+Piper voices, such as hu_HU-anna-medium, speak other languages.
 Set it for one file with \\[universal-argument] \\[kokoro-select-voice]."
   :type 'string
   :safe #'stringp)
@@ -131,8 +146,10 @@ Set it for one file with \\[universal-argument] \\[kokoro-select-voice]."
     "af_alloy" "af_aoede" "af_jessica" "af_kore"
     "am_michael" "am_fenrir" "am_puck" "am_adam" "am_echo" "am_eric" "am_liam" "am_onyx"
     "bf_emma" "bf_isabella" "bf_alice" "bf_lily"
-    "bm_george" "bm_fable" "bm_daniel" "bm_lewis")
-  "Voices offered by `kokoro-select-voice'."
+    "bm_george" "bm_fable" "bm_daniel" "bm_lewis"
+    "hu_HU-anna-medium" "hu_HU-berta-medium" "hu_HU-imre-medium")
+  "Voices offered by `kokoro-select-voice'.
+Names like hu_HU-anna-medium are Piper voices; see `kokoro-piper-directory'."
   :type '(repeat string))
 
 (defcustom kokoro-speed 1.0
@@ -814,14 +831,31 @@ For example {[0-9.]+} leaves out references like {1.42}."
     (?h . "Hindi") (?i . "Italian") (?j . "Japanese") (?p . "Brazilian Portuguese")
     (?z . "Mandarin Chinese")))
 
+(defconst kokoro--piper-languages
+  '(("hu" . "Hungarian") ("de" . "German") ("nl" . "Dutch") ("pl" . "Polish")
+    ("cs" . "Czech") ("ro" . "Romanian") ("ru" . "Russian") ("fa" . "Persian"))
+  "Names of some languages of Piper voices, by language code.")
+
+(defconst kokoro--piper-sexes
+  '(("anna" . female) ("berta" . female) ("imre" . male))
+  "Whether some Piper voices are female or male, by name.")
+
+(defun kokoro--piper-voice-p (voice)
+  (string-match-p "\\`[a-z][a-z][a-z]?_[A-Z][A-Z]-" voice))
+
 (defun kokoro--voice-language (voice)
-  (or (alist-get (aref voice 0) kokoro--languages) "Other"))
+  (if (kokoro--piper-voice-p voice)
+      (let ((code (car (split-string voice "_"))))
+        (or (cdr (assoc code kokoro--piper-languages)) code))
+    (or (alist-get (aref voice 0) kokoro--languages) "Other")))
 
 (defun kokoro--voice-description (voice)
   "E.g. \"American English, female\" for VOICE af_heart."
   (concat (kokoro--voice-language voice)
-          (pcase (and (> (length voice) 1) (aref voice 1))
-            (?f ", female") (?m ", male") (_ ""))))
+          (pcase (if (kokoro--piper-voice-p voice)
+                     (cdr (assoc (nth 1 (split-string voice "-")) kokoro--piper-sexes))
+                   (and (> (length voice) 1) (aref voice 1)))
+            ((or ?f 'female) ", female") ((or ?m 'male) ", male") (_ ""))))
 
 (defun kokoro--read-voice ()
   "Ask for a voice, showing its accent and whether it is female or male."

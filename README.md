@@ -174,12 +174,22 @@ The text stays in the buffer and in the highlight; it is only not spoken.
 Saved audio (`C-c t w`) leaves it out too. Voices starting with `a` are American English and
 with `b` British English; the voice list shows which are female and male.
 
+## Other languages (Piper)
+
+Voices named like `hu_HU-anna-medium` are spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl)
+instead of Kokoro, for languages Kokoro lacks. The Hungarian voices
+`hu_HU-anna-medium`, `hu_HU-berta-medium` and `hu_HU-imre-medium` are in the
+voice list; any other Piper voice can be added to `kokoro-voices`. A voice is
+downloaded (about 60 MB) the first time it is used. Give a Hungarian book its
+voice with `C-u C-c t v`.
+
 ## Options
 
 | Option                  | What it does                                               |
 |-------------------------|------------------------------------------------------------|
 | `kokoro-voice`, `kokoro-speed` | Voice and speed (can be set per file)              |
 | `kokoro-model-directory` | Where the voice model is kept (nil: the Hugging Face cache) |
+| `kokoro-piper-directory` | Where Piper voices are kept (nil: `piper` in the model directory) |
 | `kokoro-sources-file`   | Where per-file voice and speed are kept (nil: nowhere)     |
 | `kokoro-remember-place` | Remember where reading got to in each file (`C-c t c`)     |
 | `kokoro-remove-regexps` | Regexps of text left out in every file                     |
@@ -212,6 +222,7 @@ Example: add your own words.
 
 - `kokoro.el`: the package
 - `kokoro_server.py`: the speech server Emacs starts
+- `piper_voices.py`: speaks with Piper voices, for other languages
 - `narrate.py`: turns text into an audio file (`C-c t w`); it also works on its
   own: `python narrate.py book.pdf -v bm_george -o book.mp3`
 

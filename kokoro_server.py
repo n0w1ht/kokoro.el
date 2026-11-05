@@ -20,6 +20,8 @@ import threading
 
 import numpy as np
 
+import piper_voices
+
 SAMPLE_RATE = 24000
 BLOCK = SAMPLE_RATE // 20  # 50 ms: how quickly stop and pause take effect
 
@@ -40,6 +42,7 @@ class Server:
         self.KPipeline = KPipeline
         self.model = KModel(repo_id="hexgrad/Kokoro-82M").eval()
         self.pipelines = {}
+        self.piper = piper_voices.Voices(SAMPLE_RATE)
         self.epoch = 0           # bumped by "stop"; older work is discarded
         self.paused = threading.Event()
         self.todo = queue.Queue()
@@ -59,10 +62,14 @@ class Server:
                 continue
             try:
                 voice = item.get("voice", "af_heart")
-                parts = [audio.numpy() if hasattr(audio, "numpy") else audio
-                         for _, _, audio in self.pipeline(voice)(
-                             item["text"], voice=voice, speed=float(item.get("speed", 1.0)))
-                         if audio is not None]
+                speed = float(item.get("speed", 1.0))
+                if piper_voices.is_piper(voice):
+                    parts = list(self.piper.speak(item["text"], voice, speed))
+                else:
+                    parts = [audio.numpy() if hasattr(audio, "numpy") else audio
+                             for _, _, audio in self.pipeline(voice)(
+                                 item["text"], voice=voice, speed=speed)
+                             if audio is not None]
                 audio = np.concatenate(parts) if parts else np.zeros(0, np.float32)
             except Exception as err:  # keep serving after a bad sentence
                 emit(event="error", id=item.get("id"), msg=str(err))

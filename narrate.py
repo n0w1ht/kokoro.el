@@ -15,6 +15,7 @@ is on PATH.
 Voices (American): af_heart, af_bella, af_nicole, am_michael, am_fenrir ...
 Voices (British):  bf_emma, bf_isabella, bm_george, bm_fable ...
 The first letter of the voice picks the language: a=US English, b=UK English.
+Piper voices such as hu_HU-anna-medium speak other languages (piper_voices.py).
 """
 import argparse
 import os
@@ -27,6 +28,8 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
+
+import piper_voices
 
 SAMPLE_RATE = 24000
 SENTENCE_PAUSE = 0.12   # seconds of silence after a sentence
@@ -110,8 +113,15 @@ def main():
         if not shutil.which("ffmpeg"):
             sys.exit(f"Saving {ext} needs ffmpeg on PATH (winget install Gyan.FFmpeg), or save .wav")
 
-    from kokoro import KPipeline
-    pipeline = KPipeline(lang_code=args.voice[0], repo_id="hexgrad/Kokoro-82M")
+    if piper_voices.is_piper(args.voice):
+        voices = piper_voices.Voices(SAMPLE_RATE)
+        speak = lambda text: voices.speak(text, args.voice, args.speed)
+    else:
+        from kokoro import KPipeline
+        pipeline = KPipeline(lang_code=args.voice[0], repo_id="hexgrad/Kokoro-82M")
+        speak = lambda text: (audio for _, _, audio in pipeline(
+            text, voice=args.voice, speed=args.speed,
+            split_pattern=None if args.lines else r"\n+"))
 
     # Written as it goes, so a whole book never has to fit in memory.
     fd, wav = tempfile.mkstemp(suffix=".wav", dir=out.parent) if ext != ".wav" else (None, out)
@@ -121,8 +131,7 @@ def main():
         with sf.SoundFile(wav, "w", samplerate=SAMPLE_RATE, channels=1, subtype="PCM_16") as f:
             for i, (text, pause) in enumerate(pieces):
                 print(f"[{i + 1}/{len(pieces)}] {text[:70]}", flush=True)
-                for _, _, audio in pipeline(text, voice=args.voice, speed=args.speed,
-                                            split_pattern=None if args.lines else r"\n+"):
+                for audio in speak(text):
                     if audio is not None:
                         f.write(audio.numpy() if hasattr(audio, "numpy") else audio)
                 f.write(np.zeros(int(SAMPLE_RATE * pause), dtype=np.float32))

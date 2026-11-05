@@ -6,6 +6,8 @@ en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_
 numpy
 sounddevice
 soundfile
+# Piper, for voices in languages Kokoro lacks (e.g. Hungarian)
+piper-tts
 # only for saving PDF (without pdf-tools) and Word files as audio (C-c t w)
 pypdf
 python-docx

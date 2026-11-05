@@ -594,16 +594,27 @@
 ;;;; Voice description
 
 (ert-deftest kokoro-test-model-directory ()
-  (let ((process-environment '("HOME=/home/me")))
+  (let ((process-environment '("HOME=/home/me"))
+        (kokoro-piper-directory nil))
     (let ((kokoro-model-directory nil))
-      (should (equal (kokoro--process-environment "A=1") '("A=1" "HOME=/home/me"))))
+      (should (equal (kokoro--process-environment "A=1")
+                     (list "A=1" (concat "KOKORO_PIPER_DIR="
+                                         (expand-file-name "~/.local/share/piper"))
+                           "HOME=/home/me"))))
     (let ((kokoro-model-directory "/opt/kokoro"))
       (should (equal (kokoro--process-environment "A=1")
-                     '("A=1" "HF_HUB_CACHE=/opt/kokoro" "HOME=/home/me"))))))
+                     '("A=1" "HF_HUB_CACHE=/opt/kokoro" "KOKORO_PIPER_DIR=/opt/kokoro/piper"
+                       "HOME=/home/me"))))
+    (let ((kokoro-piper-directory "/opt/piper"))
+      (should (member "KOKORO_PIPER_DIR=/opt/piper" (kokoro--process-environment))))))
 
 (ert-deftest kokoro-test-voice-description ()
   (should (equal (kokoro--voice-description "af_heart") "American English, female"))
   (should (equal (kokoro--voice-description "bm_george") "British English, male"))
+  (should (equal (kokoro--voice-description "hu_HU-anna-medium") "Hungarian, female"))
+  (should (equal (kokoro--voice-description "hu_HU-imre-medium") "Hungarian, male"))
+  (should (equal (kokoro--voice-description "sv_SE-nst-medium") "sv"))
+  (should (equal (kokoro--voice-description "hf_alpha") "Hindi, female"))
   (should (equal (kokoro--voice-description "xx") "Other")))
 
 ;;;; Header line
