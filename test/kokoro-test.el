@@ -438,6 +438,61 @@
               (kokoro-stop))
             (kill-buffer)))))))
 
+;;;; pdf-canvas (real, when it is on the load path and its module loads)
+
+(defun kokoro-test--canvas-p ()
+  "Non-nil when pdf-canvas and its module can be used."
+  (and (require 'pdf-canvas nil t)
+       (ignore-errors (pdf-canvas--load-module) t)
+       (fboundp 'pdf-canvas-char-layout)))
+
+(ert-deftest kokoro-test-pdf-canvas ()
+  (skip-unless (kokoro-test--canvas-p))
+  (kokoro-test--with-fake-server
+    (let* ((file (expand-file-name "test.pdf" (file-name-directory
+                                               (locate-library "pdf-canvas"))))
+           (pdf-canvas-prefetch nil)
+           (pdf (progn (skip-unless (file-exists-p file))
+                       (pdf-canvas-open file)))
+           (marks 'unset))
+      (unwind-protect
+          (with-current-buffer pdf
+            (should (kokoro--pdf-p))
+            (should (= (kokoro--pdf-page-count pdf) 3))
+            (cl-letf* ((set-marks (symbol-function 'pdf-canvas-set-marks))
+                       ((symbol-function 'pdf-canvas-set-marks)
+                        (lambda (m &optional color)
+                          (setq marks m)
+                          (funcall set-marks m color))))
+              ;; Page 1 is read from its first sentence.
+              (kokoro-read-dwim)
+              (should (equal (car (kokoro-test--spoken sent))
+                             "The quick brown fox jumps over the lazy dog."))
+              (kokoro-test--play (car (car kokoro--pending)))
+              ;; The sentence is tinted on page 1, line by line.
+              (should (consp marks))
+              (should (= (car (car marks)) 1))
+              ;; At the end of the page, reading goes on to page 2.
+              (setq sent nil)
+              (funcall (plist-get kokoro--session :next))
+              (should (= (plist-get kokoro--session :page) 2))
+              (should (= (pdf-canvas-current-page) 2))
+              ;; Page 1 ends mid-sentence, so the first sentence of
+              ;; page 2 was read with it.
+              (should (equal (car (kokoro-test--spoken sent))
+                             "Section 1.1 starts here."))
+              (kokoro-stop)
+              ;; Stopping takes the tint away.
+              (should (null marks))
+              ;; A selection is read instead of the page.
+              (pdf-canvas-add-selection '(:page 3 :ends (0 0 1 1) :mode 2))
+              (setq sent nil)
+              (kokoro-read-dwim)
+              (should (string-match-p "Page three"
+                                      (string-join (kokoro-test--spoken sent) " ")))
+              (kokoro-stop)))
+        (kill-buffer pdf)))))
+
 ;;;; Moving about
 
 (ert-deftest kokoro-test-repeat-and-paragraphs ()

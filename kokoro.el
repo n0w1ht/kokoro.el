@@ -11,7 +11,8 @@
 
 ;;; Commentary:
 
-;; Reads buffers, EPUB chapters (nov.el) and PDF pages (pdf-tools) aloud
+;; Reads buffers, EPUB chapters (nov.el) and PDF pages (pdf-tools or
+;; pdf-canvas) aloud
 ;; with the Kokoro-82M text-to-speech model, highlighting each sentence
 ;; as it is spoken, on the PDF page too.  A small Python server
 ;; (kokoro_server.py, next to this file) keeps the model loaded, so
@@ -64,6 +65,12 @@
 
 (declare-function image-mode-window-get "image-mode")
 (declare-function pdf-info-charlayout "ext:pdf-info")
+(declare-function pdf-canvas-char-layout "ext:pdf-canvas" (page))
+(declare-function pdf-canvas-page-count "ext:pdf-canvas" ())
+(declare-function pdf-canvas-current-page "ext:pdf-canvas" ())
+(declare-function pdf-canvas-goto-page "ext:pdf-canvas" (page))
+(declare-function pdf-canvas-selections "ext:pdf-canvas" ())
+(declare-function pdf-canvas-set-marks "ext:pdf-canvas" (marks &optional color))
 (declare-function pdf-info-number-of-pages "ext:pdf-info")
 (declare-function pdf-view-goto-page "ext:pdf-view")
 (declare-function pdf-view-active-region-p "ext:pdf-view")
@@ -732,6 +739,63 @@ PLIST may have :voice, :speed and :remove (a list of regexps).")
           (setq-local kokoro-pdf-margins margins))
         (setq kokoro--file-removals (plist-get settings :remove))))))
 
+;;;; PDF viewers
+;;
+;; A PDF is read in pdf-tools (`pdf-view-mode') or pdf-canvas
+;; (`pdf-canvas-mode').  These functions hide the difference.
+
+(defun kokoro--pdf-p (&optional buffer)
+  "Non-nil if BUFFER (default: the current buffer) shows a PDF."
+  (with-current-buffer (or buffer (current-buffer))
+    (derived-mode-p 'pdf-view-mode 'pdf-canvas-mode)))
+
+(defun kokoro--canvas-p (&optional buffer)
+  "Non-nil if BUFFER (default: the current buffer) is a pdf-canvas buffer."
+  (with-current-buffer (or buffer (current-buffer))
+    (derived-mode-p 'pdf-canvas-mode)))
+
+(defun kokoro--pdf-page-count (pdf)
+  "The number of pages of the PDF buffer PDF."
+  (with-current-buffer pdf
+    (if (kokoro--canvas-p) (pdf-canvas-page-count) (pdf-info-number-of-pages))))
+
+(defun kokoro--pdf-page (&optional window)
+  "The page of the PDF shown in WINDOW, or in the current buffer."
+  (if (kokoro--canvas-p (if window (window-buffer window) (current-buffer)))
+      (with-current-buffer (if window (window-buffer window) (current-buffer))
+        (if window
+            (with-selected-window window (pdf-canvas-current-page))
+          (pdf-canvas-current-page)))
+    (image-mode-window-get 'page window)))
+
+(defun kokoro--pdf-goto (page &optional window)
+  "Show PAGE of the PDF in WINDOW, or in the selected window."
+  (if (kokoro--canvas-p)
+      (pdf-canvas-goto-page page)
+    (pdf-view-goto-page page window)))
+
+(defun kokoro--pdf-charlayout (pdf page)
+  "The characters of PAGE of PDF with their edges, as `pdf-info-charlayout'."
+  (with-current-buffer pdf
+    (if (kokoro--canvas-p)
+        (pdf-canvas-char-layout page)
+      (pdf-info-charlayout page))))
+
+(defun kokoro--pdf-selected-text ()
+  "The texts selected in this PDF, as a list, or nil if none is."
+  (if (kokoro--canvas-p)
+      (delq nil (mapcar (lambda (s) (and (not (plist-get s :figure))
+                                         (plist-get s :text)))
+                        (pdf-canvas-selections)))
+    (and (pdf-view-active-region-p) (pdf-view-active-region-text))))
+
+(defun kokoro--pdf-redisplay (pdf &optional window)
+  "Show the pages of PDF in WINDOW without what Kokoro drew on them."
+  (with-current-buffer pdf
+    (if (kokoro--canvas-p)
+        (pdf-canvas-set-marks nil)
+      (pdf-view-redisplay window))))
+
 ;;;###autoload
 (defun kokoro-set-pdf-margins (top bottom)
   "Leave out the TOP and BOTTOM percent of each page of this PDF.
@@ -739,7 +803,7 @@ This is remembered for the PDF; `kokoro-pdf-margins' is used for others.
 The part that is read is shaded on the page until it is redrawn."
   (interactive
    (progn
-     (unless (derived-mode-p 'pdf-view-mode)
+     (unless (kokoro--pdf-p)
        (user-error "Kokoro: not a PDF"))
      (kokoro--apply-source (current-buffer))
      (let ((now (or kokoro-pdf-margins '(0 . 0))))
@@ -757,10 +821,15 @@ The part that is read is shaded on the page until it is redrawn."
     (dolist (win (get-buffer-window-list pdf nil t))
       (with-selected-window win
         (ignore-errors
-          (pdf-view-display-region
-           (list (image-mode-window-get 'page win)
-                 (list 0 (car margins) 1 (- 1 (cdr margins))))
-           t))))
+          (if (kokoro--canvas-p)
+              (pdf-canvas-set-marks
+               (list (list (kokoro--pdf-page win)
+                           0 (car margins) 1 (- 1 (cdr margins))))
+               "#d8e4f8")
+            (pdf-view-display-region
+             (list (image-mode-window-get 'page win)
+                   (list 0 (car margins) 1 (- 1 (cdr margins))))
+             t)))))
     (message "Kokoro: reading this PDF from %s%% to %s%% of the page height (shaded)"
              top (- 100 bottom))
     ;; Read the page again with the new margins.
@@ -786,7 +855,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
     (unless (member regexp kokoro--file-removals)
       (setq kokoro--file-removals (append kokoro--file-removals (list regexp)))
       (kokoro--remember 'kokoro--file-removals kokoro--file-removals))
-    (let ((count (unless (derived-mode-p 'pdf-view-mode)
+    (let ((count (unless (kokoro--pdf-p)
                    (how-many regexp (point-min) (point-max)))))
       (message "Kokoro: leaving out \"%s\" in %s%s%s" regexp
                (if (kokoro--source-key) "this file" "this buffer")
@@ -973,7 +1042,7 @@ Return nil, reading on as before, when there is none."
       (move-overlay kokoro--overlay beg end buf)
       (cond
        ((and (buffer-live-p display)
-             (with-current-buffer display (derived-mode-p 'pdf-view-mode)))
+             (kokoro--pdf-p display))
         (when kokoro-pdf-highlight
           (kokoro--pdf-highlight display beg end)))
        (kokoro-follow
@@ -1097,10 +1166,11 @@ The sources file is written when reading stops, or once a minute."
   "Read the current buffer on from PLACE, made by `kokoro--place-of'."
   (cond
    ((plist-get place :page)
-    (unless (derived-mode-p 'pdf-view-mode)
+    (unless (kokoro--pdf-p)
       (user-error "Kokoro: the place is a PDF page, but this is not a PDF"))
-    (let ((page (min (plist-get place :page) (pdf-info-number-of-pages))))
-      (pdf-view-goto-page page)
+    (let ((page (min (plist-get place :page)
+                     (kokoro--pdf-page-count (current-buffer)))))
+      (kokoro--pdf-goto page)
       (kokoro--read-pdf-page (current-buffer) page (plist-get place :offset))))
    (t
     (when-let* ((chapter (plist-get place :chapter))
@@ -1176,7 +1246,7 @@ property `kokoro-pdf', as (PAGE LEFT TOP RIGHT BOTTOM)."
          (top (or (car margins) 0))
          (bottom (- 1 (or (cdr margins) 0)))
          (start (point)))
-    (pcase-dolist (`(,char ,edges) (with-current-buffer pdf (pdf-info-charlayout page)))
+    (pcase-dolist (`(,char ,edges) (kokoro--pdf-charlayout pdf page))
       (when (or (memq char '(?\s ?\t ?\n))
                 (and (>= (nth 1 edges) top) (<= (nth 3 edges) bottom)))
         (insert (propertize (char-to-string char) 'kokoro-pdf (cons page edges)))))
@@ -1204,7 +1274,7 @@ SKIP characters at the start of the page were read with the page before.
 When FROM is `last', start at the page's last sentence.
 A sentence running onto the next page is finished before turning it."
   (kokoro--apply-source pdf)            ; its own margins, before reading the page
-  (let ((pages (with-current-buffer pdf (pdf-info-number-of-pages)))
+  (let ((pages (kokoro--pdf-page-count pdf))
         carry)
     (with-current-buffer (get-buffer-create " *kokoro-pdf*")
       (erase-buffer)
@@ -1241,9 +1311,9 @@ A sentence running onto the next page is finished before turning it."
 
 (defun kokoro--pdf-next (pdf page carry)
   (when (and (buffer-live-p pdf)
-             (< page (with-current-buffer pdf (pdf-info-number-of-pages))))
+             (< page (kokoro--pdf-page-count pdf)))
     (when-let* ((win (get-buffer-window pdf t)))
-      (with-selected-window win (pdf-view-goto-page (1+ page) win)))
+      (with-selected-window win (kokoro--pdf-goto (1+ page) win)))
     (kokoro--read-pdf-page pdf (1+ page) carry)
     t))
 
@@ -1251,7 +1321,7 @@ A sentence running onto the next page is finished before turning it."
   "Read the page before PAGE of PDF, FROM its start or `last' sentence."
   (when (buffer-live-p pdf)
     (when-let* ((win (get-buffer-window pdf t)))
-      (with-selected-window win (pdf-view-goto-page (1- page) win)))
+      (with-selected-window win (kokoro--pdf-goto (1- page) win)))
     (kokoro--read-pdf-page pdf (1- page) nil from)))
 
 (defun kokoro--pdf-boxes (beg end)
@@ -1324,9 +1394,31 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
        :width width)
      (and (bound-and-true-p pdf-view-roll-minor-mode) page))))
 
+(defun kokoro--canvas-highlight (pdf boxes)
+  "Tint BOXES, an alist (PAGE . BOXES), on the pages of the pdf-canvas PDF."
+  (let* ((underline (eq kokoro-pdf-highlight-style 'underline))
+         (opacity (min 1.0 (if underline
+                               (* 2 kokoro-pdf-highlight-opacity)
+                             kokoro-pdf-highlight-opacity)))
+         ;; pdf-canvas multiplies the page by the color, which keeps the
+         ;; words dark, as a marker does.
+         (color (kokoro--pdf-blend kokoro-pdf-highlight-color opacity)))
+    (with-current-buffer pdf
+      (pdf-canvas-set-marks
+       (mapcan (lambda (entry)
+                 (mapcar (lambda (box) (cons (car entry) box))
+                         (kokoro--pdf-marks (cdr entry))))
+               boxes)
+       color))))
+
 (defun kokoro--pdf-highlight (pdf beg end)
   "Highlight the text from BEG to END on the pages of PDF on screen."
   (let ((boxes (with-current-buffer (marker-buffer beg) (kokoro--pdf-boxes beg end))))
+    (if (kokoro--canvas-p pdf)
+        (condition-case err
+            (kokoro--canvas-highlight pdf boxes)
+          (error (message "Kokoro: cannot highlight the page: %s"
+                          (error-message-string err))))
     (dolist (win (get-buffer-window-list pdf nil t))
       (with-selected-window win
         (condition-case err
@@ -1336,7 +1428,7 @@ Return an alist (PAGE . BOXES), one box (LEFT TOP RIGHT BOTTOM) per line."
                   (kokoro--pdf-show-boxes page here)
                 (pdf-view-redisplay win)))
           (error (message "Kokoro: cannot highlight the page: %s"
-                          (error-message-string err))))))))
+                          (error-message-string err)))))))))
 
 ;;;; Header line
 
@@ -1392,9 +1484,12 @@ It is turned on in the buffer being read, unless `kokoro-header-line' is nil."
         (when kokoro--auto-mode
           (kokoro-mode -1)
           (setq kokoro--auto-mode nil))
-        (when (derived-mode-p 'pdf-view-mode)
+        (cond
+         ((kokoro--canvas-p)
+          (ignore-errors (kokoro--pdf-redisplay buf)))
+         ((derived-mode-p 'pdf-view-mode)
           (dolist (win (get-buffer-window-list buf nil t))
-            (ignore-errors (pdf-view-redisplay win))))))
+            (ignore-errors (pdf-view-redisplay win)))))))
     (force-mode-line-update t)))
 
 (defun kokoro--button (label command help)
@@ -1468,8 +1563,8 @@ It is turned on in the buffer being read, unless `kokoro-header-line' is nil."
 (defun kokoro-read-buffer ()
   "Read the whole buffer, book or PDF aloud."
   (interactive)
-  (if (derived-mode-p 'pdf-view-mode)
-      (progn (pdf-view-goto-page 1)
+  (if (kokoro--pdf-p)
+      (progn (kokoro--pdf-goto 1)
              (kokoro--read-pdf-page (current-buffer) 1))
     (kokoro--read (point-min) (point-max) (kokoro--book-props))))
 
@@ -1497,13 +1592,13 @@ DISPLAY is the buffer to show the controls in."
 In a PDF, read the selected text, or the pages from the current one on."
   (interactive)
   (cond
-   ((derived-mode-p 'pdf-view-mode)
-    (if (pdf-view-active-region-p)
-        (kokoro-read-string (string-join (pdf-view-active-region-text) "\n")
-                            (current-buffer))
-      ;; `pdf-view-current-page' is a macro, so it cannot be called from
-      ;; code compiled without pdf-tools; this is what it expands to.
-      (kokoro--read-pdf-page (current-buffer) (image-mode-window-get 'page))))
+   ((kokoro--pdf-p)
+    (let ((selected (kokoro--pdf-selected-text)))
+      (if selected
+          (kokoro-read-string (string-join selected "\n") (current-buffer))
+        ;; `pdf-view-current-page' is a macro, so it cannot be called from
+        ;; code compiled without pdf-tools; this is what it expands to.
+        (kokoro--read-pdf-page (current-buffer) (kokoro--pdf-page)))))
    ((use-region-p)
     (deactivate-mark)
     (kokoro-read-region (region-beginning) (region-end)))
@@ -1668,9 +1763,9 @@ In a PDF, every page without its margins; in an EPUB, every chapter."
   (let ((kokoro--session (list :display buf))) ; its own left-out text
     (with-current-buffer buf
       (cond
-       ((derived-mode-p 'pdf-view-mode)
+       ((kokoro--pdf-p)
         (with-temp-buffer
-          (dotimes (i (with-current-buffer buf (pdf-info-number-of-pages)))
+          (dotimes (i (kokoro--pdf-page-count buf))
             (kokoro--pdf-insert-page buf (1+ i))
             (insert "\n"))
           (kokoro--export-sentences (point-min) (point-max))))
@@ -1776,7 +1871,7 @@ script.  The kind of audio file is OUTPUT's extension; see
         (cond
          ((or (null buf)
               (and (equal ext "pdf")
-                   (not (with-current-buffer buf (derived-mode-p 'pdf-view-mode)))))
+                   (not (kokoro--pdf-p buf))))
           ;; Word, or a PDF without pdf-tools: the script reads it.
           (let ((remembered (cdr (assoc (abbreviate-file-name (expand-file-name file))
                                         (and kokoro-sources-file (kokoro--sources))))))
@@ -1800,7 +1895,7 @@ In a PDF, narrate the selected text."
   (interactive
    (progn
      (unless (or (use-region-p)
-                 (and (derived-mode-p 'pdf-view-mode) (pdf-view-active-region-p)))
+                 (and (kokoro--pdf-p) (kokoro--pdf-selected-text)))
        (user-error "Kokoro: select the text to save first"))
      (list (and (use-region-p) (region-beginning)) (and (use-region-p) (region-end))
            (expand-file-name
@@ -1813,7 +1908,7 @@ In a PDF, narrate the selected text."
          (text (if beg
                    (kokoro--export-text buf beg end)
                  (with-temp-buffer
-                   (insert (string-join (with-current-buffer buf (pdf-view-active-region-text))
+                   (insert (string-join (with-current-buffer buf (kokoro--pdf-selected-text))
                                         "\n"))
                    (let ((kokoro--session (list :display buf)))
                      (kokoro--export-sentences (point-min) (point-max)))))))

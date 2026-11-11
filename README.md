@@ -1,6 +1,6 @@
 # kokoro.el
 
-Read buffers, EPUB books (nov.el) and PDFs (pdf-tools) aloud in Emacs with the
+Read buffers, EPUB books (nov.el) and PDFs (pdf-tools or pdf-canvas) aloud in Emacs with the
 [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) text-to-speech model.
 
 - The sentence being spoken is highlighted, on the PDF page too.
@@ -38,7 +38,7 @@ The first reading after starting Emacs waits a few seconds for the model to load
 
 - Emacs 29.1 or later
 - Python 3.10 to 3.12, with the packages in `requirements.txt`
-- Optional: pdf-tools for PDFs, nov.el for EPUBs
+- Optional: pdf-tools or pdf-canvas for PDFs, nov.el for EPUBs
 
 Kokoro runs on the CPU; a GPU is not needed. The model (about 330 MB) is
 downloaded from Hugging Face the first time it is used, into the Hugging Face
