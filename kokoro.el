@@ -39,7 +39,9 @@
 ;;               pages and EPUB chapters
 ;;   C-c t ]/[   skip to the next/previous paragraph (PDF: page)
 ;;   C-c t ,     read the sentence again
-;;   C-c t v     choose the voice         C-c t +/- faster/slower
+;;   C-c t v     choose the voice (✓: downloaded)
+;;   C-c t D     delete a downloaded voice from disk
+;;   C-c t +/-   faster/slower
 ;;   C-c t S     set the speed
 ;;   C-c t w     save a file (text, EPUB, PDF, Word) as MP3, Opus or WAV
 ;;   C-c t W     save the region as audio
@@ -112,28 +114,30 @@
   "Directory the voice model is downloaded to and loaded from, or nil.
 When nil, it is the Hugging Face cache, usually ~/.cache/huggingface/hub.
 Changing it downloads the model again there, unless you move the
-models--hexgrad--Kokoro-82M folder from the old place into it."
+models--hexgrad--Kokoro-82M folder from the old place into it.
+Supertonic 3 is kept in its supertonic3 folder, or in ~/.cache/supertonic3
+when this is nil."
   :type '(choice (const :tag "Hugging Face cache" nil) directory))
 
-(defcustom kokoro-piper-directory nil
-  "Directory of Piper voices (e.g. hu_HU-anna-medium.onnx), or nil.
-Voices named like Piper's are spoken by Piper, for languages Kokoro
-lacks, and downloaded here when missing.  When nil, it is the piper
-folder in `kokoro-model-directory', or ~/.local/share/piper."
-  :type '(choice (const :tag "Default" nil) directory))
+(defun kokoro--supertonic-directory ()
+  "Where Supertonic 3 is kept: supertonic3 in `kokoro-model-directory'."
+  (expand-file-name (if kokoro-model-directory
+                        (expand-file-name "supertonic3" kokoro-model-directory)
+                      (or (getenv "SUPERTONIC_CACHE_DIR") "~/.cache/supertonic3"))))
 
-(defun kokoro--piper-directory ()
-  (expand-file-name (or kokoro-piper-directory
-                        (if kokoro-model-directory
-                            (expand-file-name "piper" kokoro-model-directory)
-                          "~/.local/share/piper"))))
+(defun kokoro--hub-directory ()
+  "The Hugging Face cache Kokoro and its voices are kept in."
+  (expand-file-name (or kokoro-model-directory
+                        (getenv "HF_HUB_CACHE")
+                        (and (getenv "HF_HOME") (expand-file-name "hub" (getenv "HF_HOME")))
+                        "~/.cache/huggingface/hub")))
 
 (defun kokoro--process-environment (&rest vars)
   "`process-environment' for the Python scripts, with VARS added."
   (append vars
           (and kokoro-model-directory
                (list (concat "HF_HUB_CACHE=" (expand-file-name kokoro-model-directory))))
-          (list (concat "KOKORO_PIPER_DIR=" (kokoro--piper-directory)))
+          (list (concat "SUPERTONIC_CACHE_DIR=" (kokoro--supertonic-directory)))
           process-environment))
 
 (defcustom kokoro-narrate-script (expand-file-name "narrate.py" kokoro--directory)
@@ -143,7 +147,8 @@ folder in `kokoro-model-directory', or ~/.local/share/piper."
 (defcustom kokoro-voice "af_heart"
   "Voice to read with.
 The first letter picks the accent: a for American, b for British English.
-Piper voices, such as hu_HU-anna-medium, speak other languages.
+Supertonic 3 voices, st-LANGUAGE-STYLE, such as st-hu-F1 or st-en-M2,
+speak other languages too.
 Set it for one file with \\[universal-argument] \\[kokoro-select-voice]."
   :type 'string
   :safe #'stringp)
@@ -154,9 +159,15 @@ Set it for one file with \\[universal-argument] \\[kokoro-select-voice]."
     "am_michael" "am_fenrir" "am_puck" "am_adam" "am_echo" "am_eric" "am_liam" "am_onyx"
     "bf_emma" "bf_isabella" "bf_alice" "bf_lily"
     "bm_george" "bm_fable" "bm_daniel" "bm_lewis"
-    "hu_HU-anna-medium" "hu_HU-berta-medium" "hu_HU-imre-medium")
+    "st-en-F1" "st-en-F2" "st-en-F3" "st-en-F4" "st-en-F5"
+    "st-en-M1" "st-en-M2" "st-en-M3" "st-en-M4" "st-en-M5"
+    "st-hu-F1" "st-hu-F2" "st-hu-F3" "st-hu-F4" "st-hu-F5"
+    "st-hu-M1" "st-hu-M2" "st-hu-M3" "st-hu-M4" "st-hu-M5")
   "Voices offered by `kokoro-select-voice'.
-Names like hu_HU-anna-medium are Piper voices; see `kokoro-piper-directory'."
+Names like st-hu-F1 are Supertonic 3 voices: st-, the language of the
+text (any of en, ko, ja, ar, bg, cs, da, de, el, es, et, fi, fr, hi, hr,
+hu, id, it, lt, lv, nl, pl, pt, ro, ru, sk, sl, sv, tr, uk, vi), and one
+of the styles F1-F5 (female) or M1-M5 (male)."
   :type '(repeat string))
 
 (defcustom kokoro-speed 1.0
@@ -900,37 +911,126 @@ For example {[0-9.]+} leaves out references like {1.42}."
     (?h . "Hindi") (?i . "Italian") (?j . "Japanese") (?p . "Brazilian Portuguese")
     (?z . "Mandarin Chinese")))
 
-(defconst kokoro--piper-languages
-  '(("hu" . "Hungarian") ("de" . "German") ("nl" . "Dutch") ("pl" . "Polish")
-    ("cs" . "Czech") ("ro" . "Romanian") ("ru" . "Russian") ("fa" . "Persian"))
-  "Names of some languages of Piper voices, by language code.")
+(defconst kokoro--supertonic-languages
+  '(("en" . "English") ("hu" . "Hungarian") ("de" . "German") ("nl" . "Dutch")
+    ("pl" . "Polish") ("cs" . "Czech") ("ro" . "Romanian") ("ru" . "Russian")
+    ("fr" . "French") ("es" . "Spanish") ("it" . "Italian")
+    ("pt" . "Portuguese") ("sv" . "Swedish") ("fi" . "Finnish") ("el" . "Greek")
+    ("tr" . "Turkish") ("uk" . "Ukrainian") ("ja" . "Japanese") ("ko" . "Korean"))
+  "Names of some languages of Supertonic voices, by language code.")
 
-(defconst kokoro--piper-sexes
-  '(("anna" . female) ("berta" . female) ("imre" . male))
-  "Whether some Piper voices are female or male, by name.")
-
-(defun kokoro--piper-voice-p (voice)
-  (string-match-p "\\`[a-z][a-z][a-z]?_[A-Z][A-Z]-" voice))
+(defun kokoro--supertonic-voice-p (voice)
+  (string-match-p "\\`st-[a-z][a-z]-" voice))
 
 (defun kokoro--voice-language (voice)
-  (if (kokoro--piper-voice-p voice)
-      (let ((code (car (split-string voice "_"))))
-        (or (cdr (assoc code kokoro--piper-languages)) code))
+  (if (kokoro--supertonic-voice-p voice)
+      (let ((code (nth 1 (split-string voice "-"))))
+        (or (cdr (assoc code kokoro--supertonic-languages)) code))
     (or (alist-get (aref voice 0) kokoro--languages) "Other")))
 
 (defun kokoro--voice-description (voice)
   "E.g. \"American English, female\" for VOICE af_heart."
   (concat (kokoro--voice-language voice)
-          (pcase (if (kokoro--piper-voice-p voice)
-                     (cdr (assoc (nth 1 (split-string voice "-")) kokoro--piper-sexes))
-                   (and (> (length voice) 1) (aref voice 1)))
-            ((or ?f 'female) ", female") ((or ?m 'male) ", male") (_ ""))))
+          (pcase (cond ((kokoro--supertonic-voice-p voice)
+                        (and (> (length voice) 6)
+                             (pcase (aref voice 6) (?F 'female) (?M 'male))))
+                       ((> (length voice) 1) (aref voice 1)))
+            ((or ?f 'female) ", female") ((or ?m 'male) ", male") (_ ""))
+          (and (kokoro--supertonic-voice-p voice) " (Supertonic)")))
+
+;;;; Voices on disk
+
+(defun kokoro--kokoro-voice-file-pattern (voice)
+  (expand-file-name (concat "models--hexgrad--Kokoro-82M/snapshots/*/voices/" voice ".pt")
+                    (kokoro--hub-directory)))
+
+(defun kokoro--voice-files (voice)
+  "The files of VOICE on disk, or nil when it is not downloaded.
+A Kokoro voice is a file in the Hugging Face cache.  All st- voices
+\(st-* stands for them) share the folder of Supertonic 3."
+  (cond ((string-prefix-p "st-" voice)
+         (let ((dir (kokoro--supertonic-directory)))
+           (and (file-directory-p (expand-file-name "onnx" dir)) (list dir))))
+        (t (file-expand-wildcards (kokoro--kokoro-voice-file-pattern voice)))))
+
+(defun kokoro--downloaded-voices ()
+  "Voices on disk, also ones not in `kokoro-voices'; st-* for Supertonic 3."
+  (append (delete-dups (mapcar #'file-name-base
+                               (file-expand-wildcards (kokoro--kokoro-voice-file-pattern "*"))))
+          (and (kokoro--voice-files "st-*") '("st-*"))))
+
+(defun kokoro--disk-size (files)
+  "Bytes FILES (and folders) take, following links to the data."
+  (let ((size 0))
+    (dolist (file files size)
+      (dolist (f (if (file-directory-p file)
+                     (directory-files-recursively file "" nil nil t)
+                   (list file)))
+        (let ((attrs (file-attributes (file-truename f))))
+          (when (and attrs (not (eq (file-attribute-type attrs) t)))
+            (setq size (+ size (file-attribute-size attrs)))))))))
+
+(defun kokoro--delete-linked-file (file)
+  "Delete FILE and, when it is a link, the files it leads to.
+The Hugging Face cache keeps a file as a link to a link to the data."
+  (while file
+    (let ((target (file-symlink-p file)))
+      (delete-file file)
+      (if target
+          (setq file (expand-file-name target (file-name-directory file)))
+        (dolist (extra (list (concat file ".refs") (concat file ".lock")))
+          (when (file-exists-p extra) (delete-file extra)))
+        (setq file nil)))))
+
+;;;###autoload
+(defun kokoro-delete-voice (voice)
+  "Delete VOICE from disk, to free the space it takes.
+It stays in the voice list and is downloaded again when it is next used.
+Supertonic 3 is one model for all st- voices, so it is deleted whole (st-*)."
+  (interactive
+   (let* ((voices (or (kokoro--downloaded-voices)
+                      (user-error "Kokoro: no voices are downloaded")))
+          (sizes (mapcar (lambda (v) (cons v (kokoro--disk-size (kokoro--voice-files v))))
+                         voices))
+          (width (apply #'max (mapcar #'length voices)))
+          (annotate
+           (lambda (v)
+             (concat (make-string (max 1 (- (+ width 2) (length v))) ?\s)
+                     (propertize (format "%7s  %s"
+                                         (file-size-human-readable (cdr (assoc v sizes)))
+                                         (if (equal v "st-*")
+                                             "Supertonic 3, all st- voices"
+                                           (kokoro--voice-description v)))
+                                 'face 'completions-annotations)))))
+     (list (completing-read
+            "Delete voice from disk: "
+            (lambda (string pred action)
+              (if (eq action 'metadata)
+                  `(metadata (category . kokoro-voice) (annotation-function . ,annotate))
+                (complete-with-action action voices string pred)))
+            nil t))))
+  (let* ((files (or (kokoro--voice-files voice)
+                    (user-error "Kokoro: %s is not downloaded" voice)))
+         (name (if (string-prefix-p "st-" voice) "Supertonic 3 (all st- voices)" voice))
+         (size (file-size-human-readable (kokoro--disk-size files))))
+    (when (yes-or-no-p (format "Delete %s from disk (%s)? " name size))
+      (dolist (file files)
+        (if (file-directory-p file)
+            (delete-directory file t)
+          (kokoro--delete-linked-file file)))
+      (message "Kokoro: deleted %s, %s freed" name size))))
 
 (defun kokoro--read-voice ()
-  "Ask for a voice, showing its accent and whether it is female or male."
+  "Ask for a voice, showing its accent, whether it is female or male, and
+with a check mark whether it is downloaded."
   (let* ((width (apply #'max (mapcar #'length kokoro-voices)))
+         (on-disk (kokoro--downloaded-voices))
          (annotate (lambda (voice)
                      (concat (make-string (max 1 (- (+ width 2) (length voice))) ?\s)
+                             (if (member (if (string-prefix-p "st-" voice) "st-*" voice)
+                                         on-disk)
+                                 (propertize "✓ " 'face 'success)
+                               "  ")
                              (propertize (kokoro--voice-description voice)
                                          'face 'completions-annotations))))
          (group (lambda (voice transform)
@@ -941,7 +1041,7 @@ For example {[0-9.]+} leaves out references like {1.42}."
                                  (annotation-function . ,annotate)
                                  (group-function . ,group))
                     (complete-with-action action kokoro-voices string pred)))))
-    (completing-read (format "Voice (now %s): " (kokoro--voice))
+    (completing-read (format "Voice (now %s; ✓ downloaded): " (kokoro--voice))
                      table nil t nil nil (kokoro--voice))))
 
 ;;;; Reading
@@ -1941,6 +2041,7 @@ In a PDF, narrate the selected text."
   "]" #'kokoro-next-paragraph
   "[" #'kokoro-previous-paragraph
   "v" #'kokoro-select-voice
+  "D" #'kokoro-delete-voice
   "S" #'kokoro-set-speed
   "+" #'kokoro-faster
   "-" #'kokoro-slower

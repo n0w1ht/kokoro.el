@@ -1,5 +1,7 @@
 """Speech server for kokoro.el: keeps Kokoro-82M loaded and plays sentences.
 
+Voices like st-en-F1 are spoken by Supertonic 3 (supertonic_voices.py).
+
 Reads one JSON command per line on stdin:
   {"cmd": "speak", "id": 3, "text": "...", "voice": "af_heart", "speed": 1.0}
   {"cmd": "stop"}      drop everything queued or playing
@@ -20,7 +22,7 @@ import threading
 
 import numpy as np
 
-import piper_voices
+import supertonic_voices
 
 SAMPLE_RATE = 24000
 BLOCK = SAMPLE_RATE // 20  # 50 ms: how quickly stop and pause take effect
@@ -42,7 +44,7 @@ class Server:
         self.KPipeline = KPipeline
         self.model = KModel(repo_id="hexgrad/Kokoro-82M").eval()
         self.pipelines = {}
-        self.piper = piper_voices.Voices(SAMPLE_RATE)
+        self.supertonic = supertonic_voices.Voices(SAMPLE_RATE)
         self.epoch = 0           # bumped by "stop"; older work is discarded
         self.paused = threading.Event()
         self.todo = queue.Queue()
@@ -63,8 +65,8 @@ class Server:
             try:
                 voice = item.get("voice", "af_heart")
                 speed = float(item.get("speed", 1.0))
-                if piper_voices.is_piper(voice):
-                    parts = list(self.piper.speak(item["text"], voice, speed))
+                if supertonic_voices.is_supertonic(voice):
+                    parts = list(self.supertonic.speak(item["text"], voice, speed))
                 else:
                     parts = [audio.numpy() if hasattr(audio, "numpy") else audio
                              for _, _, audio in self.pipeline(voice)(

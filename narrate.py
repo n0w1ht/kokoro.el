@@ -15,7 +15,7 @@ is on PATH.
 Voices (American): af_heart, af_bella, af_nicole, am_michael, am_fenrir ...
 Voices (British):  bf_emma, bf_isabella, bm_george, bm_fable ...
 The first letter of the voice picks the language: a=US English, b=UK English.
-Piper voices such as hu_HU-anna-medium speak other languages (piper_voices.py).
+Supertonic 3 voices such as st-hu-F1 speak other languages (supertonic_voices.py).
 """
 import argparse
 import os
@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-import piper_voices
+import supertonic_voices
 
 SAMPLE_RATE = 24000
 SENTENCE_PAUSE = 0.12   # seconds of silence after a sentence
@@ -113,8 +113,8 @@ def main():
         if not shutil.which("ffmpeg"):
             sys.exit(f"Saving {ext} needs ffmpeg on PATH (winget install Gyan.FFmpeg), or save .wav")
 
-    if piper_voices.is_piper(args.voice):
-        voices = piper_voices.Voices(SAMPLE_RATE)
+    if supertonic_voices.is_supertonic(args.voice):
+        voices = supertonic_voices.Voices(SAMPLE_RATE)
         speak = lambda text: voices.speak(text, args.voice, args.speed)
     else:
         from kokoro import KPipeline

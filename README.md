@@ -96,7 +96,8 @@ Then in your init file:
 | `C-c t n/p` | `kokoro-next/previous`      | Skip to the next or previous sentence, also across pages and chapters |
 | `C-c t ]/[` | `kokoro-next/previous-paragraph` | Skip to the next or previous paragraph; in a PDF, page |
 | `C-c t ,`   | `kokoro-repeat`             | Read the sentence again                                   |
-| `C-c t v`   | `kokoro-select-voice`       | Choose a voice (applies from the current sentence)        |
+| `C-c t v`   | `kokoro-select-voice`       | Choose a voice (applies from the current sentence); ✓ marks downloaded ones |
+| `C-c t D`   | `kokoro-delete-voice`       | Delete a downloaded voice from disk, showing its size     |
 | `C-c t S`   | `kokoro-set-speed`          | Set the speed, 0.5 to 2.0                                 |
 | `C-c t +/-` | `kokoro-faster/slower`      | Change speed by 0.1                                       |
 | `C-c t w`   | `kokoro-save-audio`         | Save a file (text, Org, Markdown, EPUB, PDF, Word) as MP3/Opus/WAV, in the background |
@@ -174,14 +175,29 @@ The text stays in the buffer and in the highlight; it is only not spoken.
 Saved audio (`C-c t w`) leaves it out too. Voices starting with `a` are American English and
 with `b` British English; the voice list shows which are female and male.
 
-## Other languages (Piper)
+## Other languages (Supertonic 3)
 
-Voices named like `hu_HU-anna-medium` are spoken by [Piper](https://github.com/OHF-Voice/piper1-gpl)
-instead of Kokoro, for languages Kokoro lacks. The Hungarian voices
-`hu_HU-anna-medium`, `hu_HU-berta-medium` and `hu_HU-imre-medium` are in the
-voice list; any other Piper voice can be added to `kokoro-voices`. A voice is
-downloaded (about 60 MB) the first time it is used. Give a Hungarian book its
-voice with `C-u C-c t v`.
+Voices named `st-LANGUAGE-STYLE`, such as `st-en-F1` or `st-hu-M2`, are spoken
+by [Supertonic 3](https://huggingface.co/Supertone/supertonic-3), which speaks
+31 languages: en, ko, ja, ar, bg, cs, da, de, el, es, et, fi, fr, hi, hr, hu,
+id, it, lt, lv, nl, pl, pt, ro, ru, sk, sl, sv, tr, uk and vi. The language
+is the one the text is in; the style is one of the voices that come with the
+model, `F1` to `F5` (female) and `M1` to `M5` (male). English and Hungarian
+voices are in the voice list; for other languages add e.g. `st-de-F1` to
+`kokoro-voices`. The model (about 400 MB) is downloaded the first time it is
+used, into `~/.cache/supertonic3` (or `supertonic3` in `kokoro-model-directory`).
+Supertonic reads plain text, not phonemes, so `kokoro-pronunciations` works
+for it as respellings ("Glee-son"); characters it cannot say are left out.
+Give a Hungarian book its voice with `C-u C-c t v`.
+
+## Downloaded voices
+
+In the voice list (`C-c t v`) a ✓ marks voices already on disk; the others
+are downloaded when first used. `C-c t D` deletes a voice from disk (it
+stays in the list), showing how much space each takes: a Kokoro voice is
+about 0.5 MB, and Supertonic 3 about 390 MB, deleted as a whole (`st-*`)
+since all its voices share one model. The Kokoro model itself is kept, as
+the speech server always loads it.
 
 ## Options
 
@@ -189,7 +205,6 @@ voice with `C-u C-c t v`.
 |-------------------------|------------------------------------------------------------|
 | `kokoro-voice`, `kokoro-speed` | Voice and speed (can be set per file)              |
 | `kokoro-model-directory` | Where the voice model is kept (nil: the Hugging Face cache) |
-| `kokoro-piper-directory` | Where Piper voices are kept (nil: `piper` in the model directory) |
 | `kokoro-sources-file`   | Where per-file voice and speed are kept (nil: nowhere)     |
 | `kokoro-remember-place` | Remember where reading got to in each file (`C-c t c`)     |
 | `kokoro-remove-regexps` | Regexps of text left out in every file                     |
@@ -222,7 +237,7 @@ Example: add your own words.
 
 - `kokoro.el`: the package
 - `kokoro_server.py`: the speech server Emacs starts
-- `piper_voices.py`: speaks with Piper voices, for other languages
+- `supertonic_voices.py`: speaks with Supertonic 3 voices
 - `narrate.py`: turns text into an audio file (`C-c t w`); it also works on its
   own: `python narrate.py book.pdf -v bm_george -o book.mp3`
 

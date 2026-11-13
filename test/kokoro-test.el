@@ -649,27 +649,65 @@
 ;;;; Voice description
 
 (ert-deftest kokoro-test-model-directory ()
-  (let ((process-environment '("HOME=/home/me"))
-        (kokoro-piper-directory nil))
+  (let ((process-environment '("HOME=/home/me")))
     (let ((kokoro-model-directory nil))
       (should (equal (kokoro--process-environment "A=1")
-                     (list "A=1" (concat "KOKORO_PIPER_DIR="
-                                         (expand-file-name "~/.local/share/piper"))
+                     (list "A=1" (concat "SUPERTONIC_CACHE_DIR="
+                                   (expand-file-name "~/.cache/supertonic3"))
                            "HOME=/home/me"))))
     (let ((kokoro-model-directory "/opt/kokoro"))
       (should (equal (kokoro--process-environment "A=1")
-                     '("A=1" "HF_HUB_CACHE=/opt/kokoro" "KOKORO_PIPER_DIR=/opt/kokoro/piper"
-                       "HOME=/home/me"))))
-    (let ((kokoro-piper-directory "/opt/piper"))
-      (should (member "KOKORO_PIPER_DIR=/opt/piper" (kokoro--process-environment))))))
+                     '("A=1" "HF_HUB_CACHE=/opt/kokoro"
+                       "SUPERTONIC_CACHE_DIR=/opt/kokoro/supertonic3" "HOME=/home/me"))))
+    (let ((process-environment '("SUPERTONIC_CACHE_DIR=/opt/st")))
+      (should (member "SUPERTONIC_CACHE_DIR=/opt/st" (kokoro--process-environment))))))
+
+;; A model directory laid out like the real one: Kokoro voices as links
+;; to links to the data, as the Hugging Face cache keeps them.
+(defun kokoro-test--fake-models (dir)
+  (let ((snap (expand-file-name "models--hexgrad--Kokoro-82M/snapshots/abc/voices" dir))
+        (refs (expand-file-name "models--hexgrad--Kokoro-82M/blobs" dir))
+        (data (expand-file-name "blobs/fe" dir)))
+    (dolist (d (list snap refs data (expand-file-name "supertonic3/onnx" dir)))
+      (make-directory d t))
+    (with-temp-file (expand-file-name "feb6" data) (insert (make-string 500 ?k)))
+    (with-temp-file (expand-file-name "feb6.refs" data) (insert "x"))
+    (make-symbolic-link "../../blobs/fe/feb6" (expand-file-name "0ab5" refs))
+    (make-symbolic-link "../../../blobs/0ab5" (expand-file-name "af_heart.pt" snap))
+    (dolist (f '("supertonic3/onnx/vocoder.onnx"))
+      (with-temp-file (expand-file-name f dir) (insert (make-string 100 ?p))))))
+
+(ert-deftest kokoro-test-downloaded-voices ()
+  (let* ((dir (make-temp-file "kokoro-models" t))
+         (kokoro-model-directory dir))
+    (unwind-protect
+        (progn
+          (kokoro-test--fake-models dir)
+          (should (equal (kokoro--downloaded-voices)
+                         '("af_heart" "st-*")))
+          (should (kokoro--voice-files "st-hu-F1"))
+          (should-not (kokoro--voice-files "bm_george"))
+          (should (= (kokoro--disk-size (kokoro--voice-files "af_heart")) 500))
+          (should (= (kokoro--disk-size (kokoro--voice-files "st-*")) 100))
+          (cl-letf (((symbol-function 'yes-or-no-p) #'always))
+            (kokoro-delete-voice "af_heart")
+            (kokoro-delete-voice "st-*"))
+          (should-not (kokoro--downloaded-voices))
+          ;; The data the links led to is gone too, not only the links.
+          (should-not (directory-files (expand-file-name "blobs/fe" dir) nil "feb6"))
+          (should-not (directory-files (expand-file-name "models--hexgrad--Kokoro-82M/blobs" dir)
+                                       nil "0ab5"))
+          (should-error (kokoro-delete-voice "af_heart") :type 'user-error))
+      (delete-directory dir t))))
 
 (ert-deftest kokoro-test-voice-description ()
   (should (equal (kokoro--voice-description "af_heart") "American English, female"))
   (should (equal (kokoro--voice-description "bm_george") "British English, male"))
-  (should (equal (kokoro--voice-description "hu_HU-anna-medium") "Hungarian, female"))
-  (should (equal (kokoro--voice-description "hu_HU-imre-medium") "Hungarian, male"))
-  (should (equal (kokoro--voice-description "sv_SE-nst-medium") "sv"))
+  (should (equal (kokoro--voice-description "st-is-F1") "is, female (Supertonic)"))
   (should (equal (kokoro--voice-description "hf_alpha") "Hindi, female"))
+  (should (equal (kokoro--voice-description "st-hu-F1") "Hungarian, female (Supertonic)"))
+  (should (equal (kokoro--voice-description "st-en-M3") "English, male (Supertonic)"))
+  (should (equal (kokoro--voice-description "st-vi-") "vi (Supertonic)"))
   (should (equal (kokoro--voice-description "xx") "Other")))
 
 ;;;; Header line
